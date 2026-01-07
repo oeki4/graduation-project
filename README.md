@@ -36,3 +36,4 @@
 
 - https://course.spacy.io/en - Ознакомительный курс по spaCy
 - https://spacy.io/api - Документация по API spaCy
+- https://medium.com/@johnidouglasmarangon/building-a-text-classification-model-with-spacy-3-x-57e59fa50547 - TextCategorizer обучение
