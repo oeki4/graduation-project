@@ -1,6 +1,7 @@
 from speech_recognizer import SpeechRecognizer
 from intent_parser import IntentParser
 from command_router import CommandRouter
+from tts_engine import TTSEngine  # Подключаем новый класс
 import sys
 import sounddevice as sd
 import soundfile as sf
@@ -17,6 +18,7 @@ class VoiceAssistant:
 
         print("⚙️ Инициализация систем...")
         try:
+            self.tts = TTSEngine(speaker='baya') # Инициализируем голос первым
             self.recognizer = SpeechRecognizer()
             self.parser = IntentParser(model_path="./nlp/models/intent_classifier")
             self.router = CommandRouter() # Создаем наш диспетчер
@@ -41,12 +43,14 @@ class VoiceAssistant:
     def start(self):
         """Запуск главного цикла ассистента."""
         self.is_running = True
+        greeting_text = "Системы активированы. Я готов к работе."
 
         # Воспроизводим звук успешного запуска
         print("🎵 Воспроизведение звука запуска...")
         self._play_sound(self.startup_sound_path)
 
-        print(f"🟢 Ассистент '{self.name.capitalize()}' готов к работе. Слушаю...")
+
+        self.tts.speak(greeting_text)
 
         try:
             for result in self.recognizer.listen(yield_partial=False):
@@ -71,6 +75,8 @@ class VoiceAssistant:
         if self.is_running:
             self.is_running = False
             print("\n🔴 Отключение систем. До свидания!")
+            farewell_text = "Отключаю питание. До свидания."
+            self.tts.speak(farewell_text) # Прощаемся голосом
             sys.exit(0)
 
     def _process(self, text):
