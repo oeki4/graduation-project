@@ -1,5 +1,4 @@
 import random
-from itertools import product
 
 def generate_fairy_tale_intent_examples():
     """

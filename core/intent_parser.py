@@ -1,7 +1,7 @@
 import spacy
 
 class IntentParser:
-    def __init__(self, model_path="my_custom_spacy_model"):
+    def __init__(self, model_path="/nlp/models/intent_classifier"):
         """
         Инициализация парсера с загрузкой вашей обученной модели.
         """

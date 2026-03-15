@@ -18,7 +18,7 @@ class VoiceAssistant:
         print("⚙️ Инициализация систем...")
         try:
             self.recognizer = SpeechRecognizer()
-            self.parser = IntentParser(model_path="my_custom_spacy_model")
+            self.parser = IntentParser(model_path="./nlp/models/intent_classifier")
             self.router = CommandRouter() # Создаем наш диспетчер
         except FileNotFoundError as e:
             print(f"❌ Критическая ошибка: {e}")
