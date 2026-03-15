@@ -2,3 +2,5 @@
 
 /nlp/.venv/
 /nlp/venv/
+/core/.venv/
+/core/vosk-model
