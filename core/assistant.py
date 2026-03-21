@@ -20,7 +20,7 @@ class VoiceAssistant:
         try:
             self.tts = TTSEngine(speaker='baya') # Инициализируем голос первым
             self.recognizer = SpeechRecognizer()
-            self.parser = IntentParser(model_path="./nlp/models/intent_classifier")
+            self.parser = IntentParser(model_path="./nlp/models/intent_model")
             self.router = CommandRouter() # Создаем наш диспетчер
         except FileNotFoundError as e:
             print(f"❌ Критическая ошибка: {e}")

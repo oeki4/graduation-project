@@ -1,7 +1,7 @@
 import spacy
 
 class IntentParser:
-    def __init__(self, model_path="/nlp/models/intent_classifier"):
+    def __init__(self, model_path="./nlp/models/intent_model"):
         """
         Инициализация парсера с загрузкой вашей обученной модели.
         """
@@ -35,5 +35,6 @@ class IntentParser:
         return {
             "intent": intent_name,
             "entities": entities,
-            "original_text": text
+            "original_text": text,
+            "spacy_doc": doc
         }

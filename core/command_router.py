@@ -1,18 +1,54 @@
+import os
+import importlib.util
+
 class CommandRouter:
     def __init__(self):
         """
-        Регистрируем маршруты: связываем имена интентов с конкретными функциями-обработчими.
+        Роутер команд с динамической загрузкой навыков (плагинов).
         """
-        self.routes = {
-            "SYSTEM_STOP": self._module_system_stop,
-            "SMART_HOME_LIGHT": self._module_smart_home_light,
-            "SET_TIMER": self._module_timer
-        }
+        self.routes = {}
+        self.load_skills()
+        
+    def register_route(self, intent, handler):
+        """Регистрирует новый обработчик для переданного интента."""
+        self.routes[intent] = handler
+        print(f"🔌 Успешно зарегистрирован интент: {intent}")
+
+    def load_skills(self, skills_dir="skills"):
+        """
+        Динамически загружает все файлы навыков из папки skills.
+        """
+        # Определяем абсолютный путь к папке skills относительно этого файла
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        skills_path = os.path.join(base_dir, skills_dir)
+        
+        if not os.path.exists(skills_path):
+            print(f"⚠️ Папка с навыками {skills_path} не найдена.")
+            return
+
+        print("🔄 Загрузка навыков (плагинов)...")
+        for filename in os.listdir(skills_path):
+            if filename.endswith(".py") and not filename.startswith("__"):
+                module_name = filename[:-3]
+                file_path = os.path.join(skills_path, filename)
+                
+                # Динамический импорт модуля
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    try:
+                        spec.loader.exec_module(module)
+                        # Ищем функцию setup и вызываем её, передавая роутер
+                        if hasattr(module, 'setup') and callable(module.setup):
+                            module.setup(self)
+                        else:
+                            print(f"⚠️ В модуле {module_name} нет функции setup(router).")
+                    except Exception as e:
+                        print(f"❌ Ошибка при загрузке навыка {module_name}: {e}")
 
     def route_command(self, parsed_data, assistant_instance):
         """
         Принимает разобранные данные от IntentParser и вызывает нужный модуль.
-        assistant_instance передается, чтобы модули могли управлять самим ассистентом (например, выключить его).
         """
         intent = parsed_data.get("intent")
         entities = parsed_data.get("entities", {})
@@ -20,27 +56,8 @@ class CommandRouter:
         print(f"🔀 [ROUTER] Маршрутизация интента: {intent} | Параметры: {entities}")
 
         if intent in self.routes:
-            # Вызываем привязанную функцию и передаем ей параметры
+            # Вызываем привязанную функцию и передаем ей все разобранные данные
             handler = self.routes[intent]
-            handler(entities, assistant_instance)
+            handler(parsed_data, assistant_instance)
         else:
             print("🤖 Ассистент: Я не совсем понял эту команду или соответствующий модуль не подключен.")
-
-    # ==========================================
-    # Ниже идут заглушки для ваших конкретных модулей
-    # В идеале эти функции будут импортироваться из других файлов (например, из modules/smart_home.py)
-    # ==========================================
-
-    def _module_system_stop(self, entities, assistant):
-        print("🤖 Ассистент: Инициирую протокол завершения работы.")
-        assistant.stop()
-
-    def _module_smart_home_light(self, entities, assistant):
-        room = entities.get("ROOM", "основной комнате")
-        action = entities.get("ACTION", "переключить")
-        print(f"🔌 [МОДУЛЬ УМНОГО ДОМА] Пытаюсь {action} свет в локации: {room}")
-        # Здесь будет реальный вызов API умного дома
-
-    def _module_timer(self, entities, assistant):
-        duration = entities.get("TIME", "5 минут")
-        print(f"⏱️ [МОДУЛЬ ТАЙМЕРА] Устанавливаю таймер на {duration}.")
