@@ -6,19 +6,21 @@ import sys
 import sounddevice as sd
 import soundfile as sf
 import os
+import threading
 
 
 class VoiceAssistant:
     def __init__(self, name="Джарвис"):
         self.name = name.lower()
         self.is_running = False
+        self._stopping = False
 
         # Укажите путь к вашему звуковому файлу (желательно .wav)
         self.startup_sound_path = "./assets/start.mp3"
 
         print("⚙️ Инициализация систем...")
         try:
-            self.tts = TTSEngine(speaker='baya') # Инициализируем голос первым
+            self.tts = TTSEngine(speaker='aidar') # Используем мужской голос Aidar
             self.recognizer = SpeechRecognizer()
             self.parser = IntentParser(model_path="./nlp/models/intent_model")
             self.router = CommandRouter() # Создаем наш диспетчер
@@ -40,6 +42,25 @@ class VoiceAssistant:
         except Exception as e:
             print(f"❌ Ошибка воспроизведения звука: {e}")
 
+    def _console_listener(self):
+        """Слушает ввод с клавиатуры в отдельном потоке (для отладки/разработки)."""
+        print("\n⌨️ [РЕЖИМ РАЗРАБОТКИ]: Вы можете вводить команды текстом и нажимать Enter.")
+        while self.is_running:
+            try:
+                user_input = input()
+                if not self.is_running:
+                    break
+                if user_input.strip():
+                    print(f"👤 Вы (консоль): {user_input}")
+                    text = user_input.lower()
+                    if self.name in text:
+                        text = text.replace(self.name, "").strip()
+                    self._process(text)
+            except EOFError:
+                break
+            except Exception as e:
+                print(f"⚠️ Ошибка чтения консоли: {e}")
+
     def start(self):
         """Запуск главного цикла ассистента."""
         self.is_running = True
@@ -49,8 +70,10 @@ class VoiceAssistant:
         print("🎵 Воспроизведение звука запуска...")
         self._play_sound(self.startup_sound_path)
 
-
         self.tts.speak(greeting_text)
+
+        # Запускаем консольный слушатель в отдельном потоке
+        threading.Thread(target=self._console_listener, daemon=True).start()
 
         try:
             for result in self.recognizer.listen(yield_partial=False):
@@ -72,12 +95,22 @@ class VoiceAssistant:
 
     def stop(self):
         """Штатное выключение ассистента."""
-        if self.is_running:
-            self.is_running = False
-            print("\n🔴 Отключение систем. До свидания!")
+        if getattr(self, '_stopping', False):
+            return
+        self._stopping = True
+        
+        self.is_running = False
+        print("\n🔴 Отключение систем. До свидания!")
+        
+        try:
             farewell_text = "Отключаю питание. До свидания."
             self.tts.speak(farewell_text) # Прощаемся голосом
-            sys.exit(0)
+        except BaseException:
+            # Игнорируем ошибки при выходе (повторный Ctrl+C, конфликты потоков)
+            pass
+        finally:
+            # Принудительно убиваем все процессы и потоки
+            os._exit(0)
 
     def _process(self, text):
         if not text:

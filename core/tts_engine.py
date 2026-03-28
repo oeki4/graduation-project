@@ -2,13 +2,19 @@ import torch
 import sounddevice as sd
 
 class TTSEngine:
-    def __init__(self, speaker='baya', sample_rate=48000):
+    def __init__(self, speaker='aidar', sample_rate=24000):
         """
         Инициализация движка синтеза речи.
-        Доступные голоса (speaker): 'aidar', 'baya', 'kseniya', 'xenia', 'eugene'
+        'aidar' - отличный мужской голос, звучит естественно. 'eugene' тоже мужской.
+        sample_rate снижен до 24000 для экономии ресурсов CPU без потери качества голоса.
+        Доступные голоса: 'aidar', 'baya', 'kseniya', 'xenia', 'eugene'
         """
         print("🔊 Загрузка голосового модуля (Silero TTS)... Это может занять пару секунд.")
         self.device = torch.device('cpu')
+        
+        # Оптимизация PyTorch JIT для CPU (дает ускорение сопоставимое с ONNX)
+        torch.set_num_threads(4)
+        
         self.speaker = speaker
         self.sample_rate = sample_rate
 

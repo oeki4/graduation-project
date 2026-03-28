@@ -14,10 +14,10 @@ def _module_fairytale(parsed_data, assistant):
     if doc:
         matcher = Matcher(doc.vocab)
         # Паттерн: ищем слово "сказка" (или синонимы), за которым следует одно или несколько существительных, прилагательных или собственных имен (название сказки)
-        pattern = [
-            {"LEMMA": {"IN": ["сказка", "песня", "история"]}}, 
-            {"POS": {"IN": ["NOUN", "PROPN", "ADJ"]}, "OP": "+"}
-        ]
+        # pattern = [
+        #     {"LEMMA": {"IN": ["сказка", "песня", "история"]}},
+        #     {"POS": {"IN": ["NOUN", "PROPN", "ADJ"]}, "OP": "+"}
+        # ]
         
         # Альтернативный паттерн: глагол "включи" + сразу название (например, "включи колобок")
         pattern2 = [
@@ -25,7 +25,7 @@ def _module_fairytale(parsed_data, assistant):
             {"POS": {"IN": ["NOUN", "PROPN", "ADJ"]}, "OP": "+"}
         ]
         
-        matcher.add("FAIRYTALE_NAME", [pattern, pattern2])
+        matcher.add("FAIRYTALE_NAME", [pattern2])
         matches = matcher(doc)
         
         if matches:
