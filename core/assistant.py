@@ -10,7 +10,7 @@ import threading
 
 
 class VoiceAssistant:
-    def __init__(self, name="Джарвис"):
+    def __init__(self, name="Ассистент"):
         self.name = name.lower()
         self.is_running = False
         self._stopping = False
@@ -114,6 +114,46 @@ class VoiceAssistant:
 
     def _process(self, text):
         if not text:
+            return
+
+        # --- Системные команды ---
+        reboot_words = ["перезагрузи", "перезагрузка", "ребут", "reboot"]
+        if any(word in text.lower() for word in reboot_words):
+            print("🔄 [SYSTEM] Перезагрузка системы...")
+            self.tts.speak("Перезагружаю систему. Скоро вернусь.")
+            if os.name == 'posix':
+                os.system("sudo reboot")
+            else:
+                os.system("shutdown /r /t 0")
+            return
+
+        shutdown_words = ["выключи", "выключить", "отключи питание", "power off"]
+        if any(word in text.lower() for word in shutdown_words):
+            print("🔴 [SYSTEM] Выключение системы...")
+            self.tts.speak("Выключаю питание. До свидания.")
+            if os.name == 'posix':
+                os.system("sudo shutdown -h now")
+            else:
+                os.system("shutdown /s /t 0")
+            return
+
+        # Управление громкостью
+        if "громче" in text.lower() or "прибавь" in text.lower():
+            print("🔊 [SYSTEM] Громкость +10%")
+            if os.name == 'posix':
+                os.system("amixer sset 'Master' 10%+")
+            else:
+                print("⚠️ Громкость изменена (эмуляция для Windows)")
+            self.tts.speak("Делаю громче.")
+            return
+
+        if "тише" in text.lower() or "убавь" in text.lower():
+            print("🔉 [SYSTEM] Громкость -10%")
+            if os.name == 'posix':
+                os.system("amixer sset 'Master' 10%-")
+            else:
+                print("⚠️ Громкость изменена (эмуляция для Windows)")
+            self.tts.speak("Сделала потише.")
             return
 
         # 1. Отдаем текст парсеру на базе spaCy

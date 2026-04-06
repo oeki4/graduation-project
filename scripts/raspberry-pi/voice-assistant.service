@@ -1,0 +1,24 @@
+[Unit]
+Description=Golosovoy Assistent
+After=network.target sound.target
+
+[Service]
+# IMPORTANT: Adjust the path below to match your installation on the Raspberry Pi
+WorkingDirectory=/home/pi/graduation-project/core
+ExecStart=/home/pi/graduation-project/core/.venv/bin/python3 main.py
+
+# Auto-restart on failure
+Restart=always
+RestartSec=10
+
+# Set user (pi is the default for Raspberry Pi OS)
+User=pi
+# Allow the user to access sound cards and devices
+Group=pi
+SupplementaryGroups=audio,pulse-access,pulse
+
+# Optional: Add environment variables if needed
+# Environment=PYTHONPATH=/home/pi/graduation-project/core
+
+[Install]
+WantedBy=multi-user.target
