@@ -36,7 +36,8 @@ def create_docbin(data, nlp, out_path):
     doc_bin.to_disk(out_path)
 
 def main():
-    base_dir = r"f:\projects\graduation-project\core\nlp"
+    # Используем относительный путь, чтобы скрипт работал и на Windows, и на Raspberry Pi
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     
     # 1. Загрузка сырых данных
     fairytale_data = load_data(os.path.join(base_dir, "fairytale.txt"), "FAIRYTALE")
@@ -137,7 +138,7 @@ def main():
     os.makedirs(model_out, exist_ok=True)
     nlp.to_disk(model_out)
     print(f"\nМодель успешно сохранена в папку {model_out}")
-    print("Для использования обученной модели напишите: nlp = spacy.load(r'f:\\projects\\graduation-project\\core\\nlp\\models\\intent_model')")
+    print(f"Теперь вы можете загрузить её как: nlp = spacy.load('{model_out}')")
 
 if __name__ == '__main__':
     main()

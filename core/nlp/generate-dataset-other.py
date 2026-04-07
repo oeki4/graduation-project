@@ -527,6 +527,11 @@ def main():
         for example in test_examples:
             f.write(example + '\n')
 
+    # Дополнительно сохраняем как other.txt для основного скрипта обучения
+    with open("other.txt", 'w', encoding='utf-8') as f:
+        for example in test_examples:
+            f.write(example + '\n')
+
     print(f"\nРазделено на:")
     print(f"  Тренировочные: {len(train_examples)} примеров")
     print(f"  Тестовые: {len(test_examples)} примеров")
