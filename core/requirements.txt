@@ -1,0 +1,13 @@
+# --- Основные компоненты (STT, TTS, Звук) ---
+vosk>=0.3.45      # Распознавание речи (Vosk)
+torch>=2.0.0      # Синтез речи (Silero TTS через torch.hub)
+sounddevice>=0.4.6 # Захват и воспроизведение аудио
+soundfile>=0.12.1  # Чтение wav-файлов (звуки запуска)
+
+# --- NLP и Парсинг намеренний ---
+spacy>=3.7.0      # Движок NLP для разбора команд
+requests>=2.31.0   # Веб-парсинг (для навыка сказок и погоды)
+numpy<2.0.0       # Версия < 2 для совместимости с spacy/torch
+
+# --- Русская языковая модель spaCy (нужна для обучения и работы) ---
+ru_core_news_md @ https://github.com/explosion/spacy-models/releases/download/ru_core_news_md-3.8.0/ru_core_news_md-3.8.0-py3-none-any.whl
