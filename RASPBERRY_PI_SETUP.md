@@ -9,8 +9,8 @@
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-# Системные библиотеки для звука, микрофона и стриминга (VLC)
-sudo apt install -y python3-venv python3-pip libportaudio2 libatlas-base-dev libsndfile1 vlc libatomic1 mpg123
+# Системные библиотеки для звука, микрофона и дополнительных инструментов
+sudo apt install -y python3-venv python3-pip libportaudio2 libatlas-base-dev libsndfile1 vlc libatomic1 mpg123 wget unzip
 ```
 
 ## 2. Подготовка проекта
@@ -33,10 +33,15 @@ pip install -r requirements.txt
 Ассистент требует наличия двух обученных моделей.
 
 ### А. Модель распознавания голоса (Vosk)
-1. Перейдите на [alphacep.com/vosk/models](https://alphacep.com/vosk/models).
-2. Скачайте русскую модель (например, `vosk-model-small-ru-0.22`).
-3. Распакуйте её содержимое в папку `core/vosk-model/` так, чтобы внутри были файлы вроде `am`, `conf`, `ivector`.
-   *Верный путь: `/home/pi/graduation-project/core/vosk-model/am`*
+Выполните эти команды, чтобы скачать и подготовить небольшую русскую модель:
+```bash
+cd /home/pi/graduation-project/core
+wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+unzip vosk-model-small-ru-0.22.zip
+mv vosk-model-small-ru-0.22 vosk-model
+rm vosk-model-small-ru-0.22.zip
+```
+*Убедитесь, что внутри `core/vosk-model/` теперь лежат файлы `am`, `conf` и другие.*
 
 ### Б. Модель интентов (NLP)
 Перед запуском нужно обучить классификатор (или положить готовую модель):
