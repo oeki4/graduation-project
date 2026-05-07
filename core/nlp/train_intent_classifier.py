@@ -1,5 +1,6 @@
 """
-Скрипт для обучения TextCategorizer для определения интента "Включи сказку"
+Скрипт для обучения TextCategorizer для определения интентов голосового ассистента.
+Поддерживаемые интенты: включить_сказку, узнать_погоду, включить_радио, другой_интент.
 """
 import spacy
 from spacy.training import Example
@@ -8,94 +9,79 @@ import random
 from pathlib import Path
 
 
+def _load_examples(filename: str, label: str) -> list:
+    """Вспомогательная функция: загружает строки из файла и возвращает список."""
+    examples = []
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    examples.append(line)
+        print(f"Загружено {len(examples)} примеров для '{label}' из {filename}")
+    except FileNotFoundError:
+        print(f"Предупреждение: файл {filename} не найден. Примеры для '{label}' пропущены.")
+    except Exception as e:
+        print(f"Ошибка при загрузке {filename}: {e}")
+    return examples
+
+
 def create_training_data():
     """
-    Создаёт обучающие данные с большим количеством вариантов
-    для интента "включить_сказку"
+    Загружает обучающие примеры из текстовых файлов и формирует датасет.
+    Каждому примеру присваивается вектор меток для всех четырёх интентов.
     """
-    # Загружаем примеры для сказок из файла
-    positive_examples = []
-    try:
-        with open("fairytale.txt", "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:  # Пропускаем пустые строки
-                    positive_examples.append(line)
-        print(f"Загружено {len(positive_examples)} примеров для 'включить_сказку' из train_examples.txt")
-    except FileNotFoundError:
-        print("Предупреждение: файл train_examples.txt не найден. Используются пустые примеры.")
-    except Exception as e:
-        print(f"Ошибка при загрузке train_examples.txt: {e}")
-    
-    # Старый список (закомментирован, используется загрузка из файла):
-    # positive_examples = [
-        # Прямые команды
-       
-    
-    # Примеры для интента "узнать погоду"
-    weather_examples = []
-    try:
-        with open("weather.txt", "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:  # Пропускаем пустые строки
-                    weather_examples.append(line)
-        print(f"Загружено {len(weather_examples)} примеров для 'узнать_погоду' из train_examples.txt")
-    except FileNotFoundError:
-        print("Предупреждение: файл train_examples.txt не найден. Используются пустые примеры.")
-    except Exception as e:
-        print(f"Ошибка при загрузке train_examples.txt: {e}")
-    
-    # Отрицательные примеры - другие интенты (кроме погоды и сказок)
-    negative_examples = []
-        # Новости
-    try:
-        with open("other.txt", "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:  # Пропускаем пустые строки
-                    negative_examples.append(line)
-        print(f"Загружено {len(negative_examples)} примеров для 'другой_интент' из train_examples.txt")
-    except FileNotFoundError:
-        print("Предупреждение: файл train_examples.txt не найден. Используются пустые примеры.")
-    except Exception as e:
-        print(f"Ошибка при загрузке train_examples.txt: {e}")
-    # Создаём обучающие данные
+    fairytale_examples = _load_examples("fairytale.txt", "включить_сказку")
+    weather_examples   = _load_examples("weather.txt",   "узнать_погоду")
+    radio_examples     = _load_examples("radio.txt",     "включить_радио")
+    other_examples     = _load_examples("other.txt",     "другой_интент")
+
     training_data = []
-    
-    # Добавляем положительные примеры для "включить_сказку"
-    for text in positive_examples:
+
+    for text in fairytale_examples:
         training_data.append({
             "text": text,
             "cats": {
                 "включить_сказку": 1.0,
-                "узнать_погоду": 0.0,
-                "другой_интент": 0.0
+                "узнать_погоду":   0.0,
+                "включить_радио":  0.0,
+                "другой_интент":   0.0,
             }
         })
-    
-    # Добавляем примеры для "узнать_погоду"
+
     for text in weather_examples:
         training_data.append({
             "text": text,
             "cats": {
                 "включить_сказку": 0.0,
-                "узнать_погоду": 1.0,
-                "другой_интент": 0.0
+                "узнать_погоду":   1.0,
+                "включить_радио":  0.0,
+                "другой_интент":   0.0,
             }
         })
-    
-    # Добавляем отрицательные примеры (другие интенты)
-    for text in negative_examples:
+
+    for text in radio_examples:
         training_data.append({
             "text": text,
             "cats": {
                 "включить_сказку": 0.0,
-                "узнать_погоду": 0.0,
-                "другой_интент": 1.0
+                "узнать_погоду":   0.0,
+                "включить_радио":  1.0,
+                "другой_интент":   0.0,
             }
         })
-    
+
+    for text in other_examples:
+        training_data.append({
+            "text": text,
+            "cats": {
+                "включить_сказку": 0.0,
+                "узнать_погоду":   0.0,
+                "включить_радио":  0.0,
+                "другой_интент":   1.0,
+            }
+        })
+
     return training_data
 
 
@@ -110,7 +96,7 @@ def evaluate_model(nlp, validation_examples):
     total = len(validation_examples)
     
     # Метрики для каждой категории
-    categories = ["включить_сказку", "узнать_погоду", "другой_интент"]
+    categories = ["включить_сказку", "узнать_погоду", "включить_радио", "другой_интент"]
     category_metrics = {cat: {"tp": 0, "fp": 0, "fn": 0} for cat in categories}
     
     for example in validation_examples:
@@ -183,6 +169,7 @@ def train_model(output_dir="models/intent_classifier", n_iter=10, patience=10, t
     # Добавляем метки категорий
     textcat.add_label("включить_сказку")
     textcat.add_label("узнать_погоду")
+    textcat.add_label("включить_радио")
     textcat.add_label("другой_интент")
     
     # Создаём обучающие данные
@@ -190,8 +177,9 @@ def train_model(output_dir="models/intent_classifier", n_iter=10, patience=10, t
     training_data = create_training_data()
     print(f"Создано {len(training_data)} примеров для обучения")
     print(f"  - Примеров 'включить_сказку': {sum(1 for ex in training_data if ex['cats']['включить_сказку'] == 1.0)}")
-    print(f"  - Примеров 'узнать_погоду': {sum(1 for ex in training_data if ex['cats']['узнать_погоду'] == 1.0)}")
-    print(f"  - Примеров 'другой_интент': {sum(1 for ex in training_data if ex['cats']['другой_интент'] == 1.0)}")
+    print(f"  - Примеров 'узнать_погоду':  {sum(1 for ex in training_data if ex['cats']['узнать_погоду'] == 1.0)}")
+    print(f"  - Примеров 'включить_радио': {sum(1 for ex in training_data if ex['cats']['включить_радио'] == 1.0)}")
+    print(f"  - Примеров 'другой_интент':  {sum(1 for ex in training_data if ex['cats']['другой_интент'] == 1.0)}")
     
     # Преобразуем данные в формат Example
     all_examples = []
@@ -257,7 +245,7 @@ def train_model(output_dir="models/intent_classifier", n_iter=10, patience=10, t
             
             # Оцениваем на валидации каждую итерацию (но детально только каждые 5)
             metrics = evaluate_model(nlp, validation_examples)
-            avg_f1 = sum(cat_metrics['f1'] for cat_metrics in metrics['categories'].values()) / len(metrics['categories'])
+            avg_f1 = sum(m['f1'] for m in metrics['categories'].values()) / len(metrics['categories'])
             
             # Краткое логирование на каждой итерации
             progress_pct = (iteration + 1) / n_iter * 100
@@ -424,11 +412,11 @@ def test_model(nlp, test_texts):
         "найди информацию": "другой_интент",
     }
     
-    categories = ["включить_сказку", "узнать_погоду", "другой_интент"]
-    
+    categories = ["включить_сказку", "узнать_погоду", "включить_радио", "другой_интент"]
+
     for text in test_texts:
         doc = nlp(text)
-        
+
         # Получаем scores для всех категорий
         scores = {cat: doc.cats.get(cat, 0.0) for cat in categories}
         
@@ -446,9 +434,10 @@ def test_model(nlp, test_texts):
         
         print(f"\n{status} Текст: '{text}'")
         print(f"   Предсказано: {predicted_intent} (уверенность: {predicted_score:.2%})")
-        print(f"   Все scores: включить_сказку={scores['включить_сказку']:.2%}, "
-              f"узнать_погоду={scores['узнать_погоду']:.2%}, "
-              f"другой_интент={scores['другой_интент']:.2%}")
+        print(f"   Все scores: сказка={scores['включить_сказку']:.2%}, "
+              f"погода={scores['узнать_погоду']:.2%}, "
+              f"радио={scores['включить_радио']:.2%}, "
+              f"другое={scores['другой_интент']:.2%}")
         if expected != "неизвестно":
             print(f"   Ожидалось: {expected}")
     
@@ -518,6 +507,18 @@ if __name__ == "__main__":
         "расскажи какая погода сегодня",
         "покажи прогноз",
         
+        # Примеры для интента "включить_радио"
+        "включи радио",
+        "поставь радио",
+        "хочу слушать радио",
+        "давай включим радио",
+        "включи маяк",
+        "поставь европу плюс",
+        "включи русское радио",
+        "давай радио",
+        "запусти онлайн радио",
+        "включи прямой эфир",
+
         # Отрицательные примеры (должны распознаться как "другой_интент")
         "включи музыку",
         "расскажи новости",
@@ -528,7 +529,6 @@ if __name__ == "__main__":
         "помоги мне",
         "что ты умеешь",
         "включи свет",
-        "поставь радио",
         "найди информацию",
     ]
     
