@@ -40,7 +40,7 @@ ru_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/ru
 setuptools==82.0.1
 shellingham==1.5.4
 smart_open==7.5.1
-miniaudio==1.68
+miniaudio==1.70
 sounddevice==0.5.5
 soundfile==0.13.1
 spacy==3.8.11
