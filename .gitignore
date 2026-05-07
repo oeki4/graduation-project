@@ -4,3 +4,4 @@
 /nlp/venv/
 /core/.venv/
 /core/vosk-model
+.claude
