@@ -1,5 +1,9 @@
 import torch
 import sounddevice as sd
+import ssl
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
 
 class TTSEngine:
     def __init__(self, speaker='aidar', sample_rate=24000):
