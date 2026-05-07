@@ -145,7 +145,7 @@ def evaluate_model(nlp, validation_examples):
     }
 
 
-def train_model(output_dir="models/intent_classifier", n_iter=10, patience=10, train_split=0.8):
+def train_model(output_dir="models/intent_model", n_iter=10, patience=10, train_split=0.8):
     """
     Обучает TextCategorizer для определения интента "включить_сказку"
     с валидацией и early stopping для предотвращения переобучения
