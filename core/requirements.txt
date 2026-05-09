@@ -41,8 +41,8 @@ setuptools==82.0.1
 shellingham==1.5.4
 smart_open==7.5.1
 miniaudio==1.70
-pycaw==20240210
-comtypes==1.4.8
+pycaw==20240210; platform_system == "Windows"
+comtypes==1.4.8; platform_system == "Windows"
 sounddevice==0.5.5
 soundfile==0.13.1
 spacy==3.8.11
