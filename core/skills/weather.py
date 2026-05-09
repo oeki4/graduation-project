@@ -4,7 +4,7 @@ def setup(router):
     """
     Регистрация интента прогноза погоды.
     """
-    router.register_route("WEATHER", _module_weather)
+    router.register_route("узнать_погоду", _module_weather)
 
 def _module_weather(parsed_data, assistant):
     doc = parsed_data.get("spacy_doc")

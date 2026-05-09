@@ -10,7 +10,7 @@ def setup(router):
     """
     Регистрация интента чтения сказки.
     """
-    router.register_route("FAIRYTALE", _module_fairytale)
+    router.register_route("включить_сказку", _module_fairytale)
 
 def _module_fairytale(parsed_data, assistant):
     """
