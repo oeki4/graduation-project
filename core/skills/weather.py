@@ -82,29 +82,34 @@ def _extract_time(text: str) -> str:
 
 def _extract_city(text: str) -> str | None:
     """
-    Извлекает название города.
+    Извлекает название города (поддерживает многословные: «нижний новгород»,
+    «санкт-петербург», «ростов на дону»).
 
     Стратегия:
-      1. Если в тексте есть «в|во|на <слово>» — берём это слово.
-      2. Иначе — последнее «значимое» слово (не из стоп-листа).
-      3. Лемматизируем результат через pymorphy3:
-         «воронеже» → «воронеж», «москве» → «москва».
+      1. Паттерн «в|во|на <слово1> [<слово2> [<слово3>]]» — берём до 3 слов.
+      2. Иначе — все «значимые» слова (не из стоп-листа), сохраняя порядок.
+      3. Каждое слово лемматизируем через pymorphy3:
+         «нижнем новгороде» → «нижний новгород»,
+         «санкт-петербурге» → «санкт-петербург».
     """
-    # Все слова и временные маркеры исключаем из кандидатов
     excluded = _STOP_WORDS | set(_TIME_KEYWORDS.keys())
 
-    # 1. Паттерн «в|во|на <город>»
-    m = re.search(r"\b(?:в|во|на)\s+([а-яё][а-яё-]+)", text)
+    # 1. Паттерн «в|во|на <город из 1–3 слов>»
+    m = re.search(
+        r"\b(?:в|во|на)\s+"
+        r"([а-яё][а-яё-]+(?:\s+[а-яё][а-яё-]+){0,2})",
+        text,
+    )
     if m:
-        candidate = m.group(1)
-        if candidate not in excluded:
-            return _normalize(candidate)
+        words = [w for w in m.group(1).split() if w not in excluded]
+        if words:
+            return " ".join(_normalize(w) for w in words)
 
-    # 2. Последнее значимое слово
+    # 2. Все слова (кроме стоп-листа) — собираем многословный город
     words = re.findall(r"[а-яё][а-яё-]+", text)
     candidates = [w for w in words if w not in excluded]
     if candidates:
-        return _normalize(candidates[-1])
+        return " ".join(_normalize(w) for w in candidates)
 
     return None
 
@@ -126,24 +131,51 @@ def _normalize(word: str) -> str:
 
 def _fetch_weather(city: str) -> str | None:
     """
-    Возвращает короткое описание погоды для города.
-    wttr.in поддерживает русские города и понимает кириллицу.
-    Формат: «температура, описание» (например, «+9°C, облачно»).
+    Возвращает описание погоды для города на русском, удобное для TTS.
+    Использует JSON API wttr.in (format=j1) — там есть поле lang_ru
+    с переводом погодных условий, в отличие от текстового %C.
+
+    Возвращает строку вида «плюс 11 градусов, облачно».
     """
     try:
-        # %t — температура, %C — текстовое описание (sky condition)
         response = requests.get(
             f"https://wttr.in/{city}",
-            params={"format": "%t, %C", "lang": "ru", "M": ""},
+            params={"format": "j1", "lang": "ru"},
             timeout=6,
             headers={"User-Agent": "VoiceAssistant/1.0"},
         )
         response.raise_for_status()
-        text = response.text.strip()
-        # Ответ wttr.in для несуществующего города содержит «Unknown location»
-        if "unknown" in text.lower() or len(text) > 80:
+        data = response.json()
+        current = data.get("current_condition", [{}])[0]
+
+        # Температура в Цельсиях
+        temp_str = current.get("temp_C", "")
+        if not temp_str:
             return None
-        return text
+        temp = int(temp_str)
+
+        # Описание на русском (lang_ru заполняется при ?lang=ru)
+        desc = ""
+        if current.get("lang_ru"):
+            desc = current["lang_ru"][0].get("value", "")
+        if not desc:
+            # Фоллбэк на английский, если перевода вдруг нет
+            desc = current.get("weatherDesc", [{}])[0].get("value", "")
+
+        # Преобразуем в форму, удобную для TTS:
+        # «+11°C, Облачно» → «плюс 11 градусов, облачно»
+        if temp > 0:
+            temp_spoken = f"плюс {temp} градусов"
+        elif temp < 0:
+            temp_spoken = f"минус {abs(temp)} градусов"
+        else:
+            temp_spoken = "ноль градусов"
+
+        return f"{temp_spoken}, {desc.lower()}"
+
     except requests.RequestException as e:
         print(f"❌ [ПОГОДА] Ошибка запроса к wttr.in: {e}")
+        return None
+    except (ValueError, KeyError, IndexError) as e:
+        print(f"❌ [ПОГОДА] Не удалось разобрать ответ: {e}")
         return None
