@@ -1,7 +1,8 @@
 from speech_recognizer import SpeechRecognizer
 from intent_parser import IntentParser
 from command_router import CommandRouter
-from tts_engine import TTSEngine  # Подключаем новый класс
+from tts_engine import TTSEngine
+from skills.audio_streamer import AudioStreamer
 import sys
 import sounddevice as sd
 import soundfile as sf
@@ -20,10 +21,13 @@ class VoiceAssistant:
 
         print("⚙️ Инициализация систем...")
         try:
-            self.tts = TTSEngine(speaker='aidar') # Используем мужской голос Aidar
+            self.tts = TTSEngine(speaker='aidar')
             self.recognizer = SpeechRecognizer()
             self.parser = IntentParser(model_path="./nlp/models/intent_model")
-            self.router = CommandRouter() # Создаем наш диспетчер
+            self.router = CommandRouter()
+            # Единый стример для всего ассистента — навыки используют его,
+            # а при новой команде он автоматически останавливается.
+            self.streamer = AudioStreamer(self)
         except FileNotFoundError as e:
             print(f"❌ Критическая ошибка: {e}")
             sys.exit(1)
@@ -101,10 +105,16 @@ class VoiceAssistant:
         
         self.is_running = False
         print("\n🔴 Отключение систем. До свидания!")
-        
+
+        # Останавливаем воспроизведение аудио если что-то играло
+        try:
+            self.streamer.stop()
+        except Exception:
+            pass
+
         try:
             farewell_text = "Отключаю питание. До свидания."
-            self.tts.speak(farewell_text) # Прощаемся голосом
+            self.tts.speak(farewell_text)
         except BaseException:
             # Игнорируем ошибки при выходе (повторный Ctrl+C, конфликты потоков)
             pass
@@ -112,52 +122,84 @@ class VoiceAssistant:
             # Принудительно убиваем все процессы и потоки
             os._exit(0)
 
+    # ------------------------------------------------------------------
+    # Управление системной громкостью
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _volume_up():
+        """Увеличивает системную громкость."""
+        print("🔊 [SYSTEM] Громкость +")
+        if os.name == 'posix':
+            os.system("amixer sset 'Master' 10%+")
+        else:
+            # Симуляция нажатия медиаклавиши Volume Up (0xAF) через Windows API
+            import ctypes
+            ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)
+
+    @staticmethod
+    def _volume_down():
+        """Уменьшает системную громкость."""
+        print("🔉 [SYSTEM] Громкость -")
+        if os.name == 'posix':
+            os.system("amixer sset 'Master' 10%-")
+        else:
+            # Симуляция нажатия медиаклавиши Volume Down (0xAE) через Windows API
+            import ctypes
+            ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)
+
+    # ------------------------------------------------------------------
+    # Обработка команды
+    # ------------------------------------------------------------------
+
     def _process(self, text):
         if not text:
             return
 
-        # --- Системные команды ---
-        reboot_words = ["перезагрузи", "перезагрузка", "ребут", "reboot"]
-        if any(word in text.lower() for word in reboot_words):
+        t = text.lower().strip()
+
+        # ── 1. Команды, которые НЕ прерывают воспроизведение ──────────
+
+        # Стоп — остановить текущее воспроизведение
+        if t in ("стоп", "стопп", "стоп стоп", "остановись", "замолчи",
+                 "хватит", "отстань", "тихо", "stop"):
+            print("⏹️  [SYSTEM] Стоп.")
+            self.streamer.stop()
+            self.tts.speak("Остановлено.")
+            return
+
+        # Громкость выше
+        if t in ("громче", "сделай громче", "прибавь громкость",
+                 "прибавь", "погромче"):
+            self._volume_up()
+            self.tts.speak("Громче.")
+            return
+
+        # Громкость ниже
+        if t in ("тише", "сделай тише", "убавь громкость",
+                 "убавь", "потише"):
+            self._volume_down()
+            self.tts.speak("Тише.")
+            return
+
+        # ── 2. Все остальные команды прерывают текущее воспроизведение ─
+        self.streamer.stop()
+
+        # ── 3. Системные команды ───────────────────────────────────────
+        if any(w in t for w in ("перезагрузи", "перезагрузка", "ребут", "reboot")):
             print("🔄 [SYSTEM] Перезагрузка системы...")
             self.tts.speak("Перезагружаю систему. Скоро вернусь.")
-            if os.name == 'posix':
-                os.system("sudo reboot")
-            else:
-                os.system("shutdown /r /t 0")
+            os.system("sudo reboot" if os.name == 'posix' else "shutdown /r /t 0")
             return
 
-        shutdown_words = ["выключи", "выключить", "отключи питание", "power off"]
-        if any(word in text.lower() for word in shutdown_words):
+        if any(w in t for w in ("выключи", "выключить", "отключи питание", "power off")):
             print("🔴 [SYSTEM] Выключение системы...")
             self.tts.speak("Выключаю питание. До свидания.")
-            if os.name == 'posix':
-                os.system("sudo shutdown -h now")
-            else:
-                os.system("shutdown /s /t 0")
+            os.system("sudo shutdown -h now" if os.name == 'posix' else "shutdown /s /t 0")
             return
 
-        # Управление громкостью
-        if "громче" in text.lower() or "прибавь" in text.lower():
-            print("🔊 [SYSTEM] Громкость +10%")
-            if os.name == 'posix':
-                os.system("amixer sset 'Master' 10%+")
-            else:
-                print("⚠️ Громкость изменена (эмуляция для Windows)")
-            self.tts.speak("Делаю громче.")
-            return
-
-        if "тише" in text.lower() or "убавь" in text.lower():
-            print("🔉 [SYSTEM] Громкость -10%")
-            if os.name == 'posix':
-                os.system("amixer sset 'Master' 10%-")
-            else:
-                print("⚠️ Громкость изменена (эмуляция для Windows)")
-            self.tts.speak("Сделала потише.")
-            return
-
-        # 1. Отдаем текст парсеру на базе spaCy
+        # ── 4. NLP — маршрутизация через spaCy ────────────────────────
         parsed_data = self.parser.parse(text)
-
-        # 2. Отдаем разобранные данные роутеру для выполнения
         self.router.route_command(parsed_data, self)

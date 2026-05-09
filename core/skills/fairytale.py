@@ -5,7 +5,6 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from mp3tales_scraper import Mp3TalesScraper
-from audio_streamer import AudioStreamer
 
 def setup(router):
     """
@@ -44,10 +43,8 @@ def _module_fairytale(parsed_data, assistant):
 
     # 3. Воспроизведение через стример
     print(f"🔗 [MARSHAL] Передаю ссылку на стриминг: {audio_url}")
-    streamer = AudioStreamer(assistant)
-    
-    # Запускаем игру (она работает в фоновом режиме через отдельный поток)
-    if streamer.play_url(audio_url):
+
+    if assistant.streamer.play_url(audio_url):
         print(f"✅ [SUCCESS] Сказка '{payload}' запущена.")
     else:
         assistant.tts.speak("Не удалось запустить онлайн трансляцию аудио.")
