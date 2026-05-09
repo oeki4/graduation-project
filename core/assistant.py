@@ -223,18 +223,16 @@ class VoiceAssistant:
         if m:
             return int(m.group(1))
 
-        # Русские числительные: может быть «двадцать пять» → 25
+        # Русские числительные: разбиваем по словам и складываем
+        # «двадцать пять» → 20 + 5 = 25
+        # «сто» → 100
+        # «пятьдесят» → 50
         total = None
-        for word, val in self._RU_NUMBERS.items():
-            if word in t:
+        for word in t.split():
+            if word in self._RU_NUMBERS:
                 if total is None:
-                    total = val
-                else:
-                    # Складываем десятки + единицы (двадцать + пять = 25)
-                    if val < 10:
-                        total += val
-                    else:
-                        total = val
+                    total = 0
+                total += self._RU_NUMBERS[word]
         return total
 
     # ------------------------------------------------------------------

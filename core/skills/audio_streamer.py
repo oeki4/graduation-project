@@ -17,8 +17,9 @@ except ImportError:
           "Для работы на Windows выполните: pip install miniaudio")
 
 # Размер начального буфера перед стартом воспроизведения для файлов (сказки).
-# 64 КБ ≈ 4 сек аудио при 128 кбит/с — достаточно, чтобы начать играть быстро.
-_PREBUFFER_BYTES = 64 * 1024
+# 256 КБ — достаточно, чтобы пропустить ID3-теги и найти валидный MP3-фрейм
+# даже на потоках с высоким битрейтом.
+_PREBUFFER_BYTES = 256 * 1024
 
 
 class AudioStreamer:
@@ -244,13 +245,30 @@ class AudioStreamer:
             # ── ждём начального буфера ────────────────────────────────
             print(f"⏳ [STREAMER] Буферизация ({_PREBUFFER_BYTES // 1024} КБ)...")
             if not prebuf_ready.wait(timeout=30) or stop_event.is_set():
+                stop_event.set()
                 return
 
             # ── ФАЗА 1: декодируем и играем то, что скачано ──────────
-            buffer.seek(0)
-            phase1_bytes = buffer.read()
-            phase1_audio, channels, rate = self._decode_mp3(phase1_bytes)
+            # Если декод не удался (мало данных, ID3-теги, неполный фрейм) —
+            # ждём ещё немного и пробуем снова, до 6 попыток (~3 сек ожидания).
+            phase1_audio, channels, rate, phase1_bytes = None, None, None, b""
+            for attempt in range(6):
+                if stop_event.is_set():
+                    return
+                buffer.seek(0)
+                phase1_bytes = buffer.read()
+                phase1_audio, channels, rate = self._decode_mp3(phase1_bytes)
+                if phase1_audio is not None:
+                    break
+                if dl_done.is_set():
+                    # Файл скачан полностью, но декод всё равно не идёт — конец
+                    break
+                print(f"⏳ [STREAMER] Декод не удался, жду ещё данные (попытка {attempt + 1})...")
+                threading.Event().wait(0.5)
+
             if phase1_audio is None:
+                print("❌ [STREAMER] Не удалось декодировать MP3. Останавливаю загрузку.")
+                stop_event.set()
                 return
 
             duration1 = len(phase1_audio) / rate
