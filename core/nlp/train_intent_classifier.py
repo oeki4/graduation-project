@@ -145,26 +145,61 @@ def evaluate_model(nlp, validation_examples):
     }
 
 
-def train_model(output_dir="models/intent_model", n_iter=10, patience=10, train_split=0.8):
+def train_model(output_dir="models/intent_model", n_iter=40, patience=10, train_split=0.8):
     """
     Обучает TextCategorizer для определения интента "включить_сказку"
     с валидацией и early stopping для предотвращения переобучения
-    
+
     Args:
         output_dir: Директория для сохранения модели
-        n_iter: Максимальное количество итераций обучения
+        n_iter: Максимальное количество итераций обучения (40 — достаточно
+                для срабатывания early stopping, ранее 10 было мало)
         patience: Количество итераций без улучшения перед остановкой
         train_split: Доля данных для обучения (остальное - валидация)
     """
     # Загружаем базовую модель
     print("Загрузка базовой модели spaCy...")
     nlp = spacy.load("ru_core_news_md")
-    
-    # Добавляем TextCategorizer в pipeline, если его нет
-    if "textcat" not in nlp.pipe_names:
-        textcat = nlp.add_pipe("textcat", last=True)
-    else:
-        textcat = nlp.get_pipe("textcat")
+
+    # Конфигурация TextCategorizer с использованием статических векторов
+    # из ru_core_news_md. По умолчанию textcat использует только BoW —
+    # такая модель плохо обобщает синонимы (рассказ ≠ сказка ≠ история).
+    # Ensemble = BoW (точные ключевые слова) + Tok2Vec со статическими
+    # векторами (семантическая близость синонимов).
+    textcat_config = {
+        "model": {
+            "@architectures": "spacy.TextCatEnsemble.v2",
+            "linear_model": {
+                "@architectures": "spacy.TextCatBOW.v3",
+                "exclusive_classes": True,
+                "ngram_size": 1,
+                "no_output_layer": False,
+                "length": 262144,
+            },
+            "tok2vec": {
+                "@architectures": "spacy.Tok2Vec.v2",
+                "embed": {
+                    "@architectures": "spacy.MultiHashEmbed.v2",
+                    "width": 64,
+                    "rows": [2000, 2000, 1000, 1000, 1000, 1000],
+                    "attrs": ["ORTH", "LOWER", "PREFIX", "SUFFIX", "SHAPE", "ID"],
+                    "include_static_vectors": True,
+                },
+                "encode": {
+                    "@architectures": "spacy.MaxoutWindowEncoder.v2",
+                    "width": 64,
+                    "depth": 2,
+                    "window_size": 1,
+                    "maxout_pieces": 3,
+                },
+            },
+        }
+    }
+
+    # Удаляем старый textcat если есть, и добавляем с нашей конфигурацией
+    if "textcat" in nlp.pipe_names:
+        nlp.remove_pipe("textcat")
+    textcat = nlp.add_pipe("textcat", config=textcat_config, last=True)
     
     # Добавляем метки категорий
     textcat.add_label("включить_сказку")
@@ -222,12 +257,16 @@ def train_model(output_dir="models/intent_model", n_iter=10, patience=10, train_
             random.shuffle(train_examples)
             losses = {}
             
-            # Создаём мини-батчи
-            batches = list(minibatch(train_examples, size=compounding(4.0, 32.0, 1.001)))
+            # Создаём мини-батчи (более агрессивный рост размера: быстрее
+            # сходимся к стабильным градиентам, но первые батчи маленькие
+            # для лучшего исследования пространства)
+            batches = list(minibatch(train_examples, size=compounding(4.0, 64.0, 1.005)))
             total_batches = len(batches)
-            
-            # Увеличиваем dropout для регуляризации (начинаем с 0.3, постепенно уменьшаем)
-            current_drop = max(0.3, 0.3 - (iteration * 0.002))
+
+            # Расписание dropout: 0.5 → 0.2 линейно по эпохам.
+            # Высокий dropout в начале спасает от переобучения на маленьком
+            # датасете, низкий в конце — позволяет точнее настроить веса.
+            current_drop = max(0.2, 0.5 - (iteration / n_iter) * 0.3)
             
             # Обучаем на батчах с прогрессом
             processed_examples = 0
