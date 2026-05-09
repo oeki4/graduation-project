@@ -1,7 +1,8 @@
 from speech_recognizer import SpeechRecognizer
 from intent_parser import IntentParser
 from command_router import CommandRouter
-from tts_engine import TTSEngine  # Подключаем новый класс
+from tts_engine import TTSEngine
+from skills.audio_streamer import AudioStreamer
 import sys
 import sounddevice as sd
 import soundfile as sf
@@ -20,10 +21,13 @@ class VoiceAssistant:
 
         print("⚙️ Инициализация систем...")
         try:
-            self.tts = TTSEngine(speaker='aidar') # Используем мужской голос Aidar
+            self.tts = TTSEngine(speaker='aidar')
             self.recognizer = SpeechRecognizer()
             self.parser = IntentParser(model_path="./nlp/models/intent_model")
-            self.router = CommandRouter() # Создаем наш диспетчер
+            self.router = CommandRouter()
+            # Единый стример для всего ассистента — навыки используют его,
+            # а при новой команде он автоматически останавливается.
+            self.streamer = AudioStreamer(self)
         except FileNotFoundError as e:
             print(f"❌ Критическая ошибка: {e}")
             sys.exit(1)
@@ -101,10 +105,16 @@ class VoiceAssistant:
         
         self.is_running = False
         print("\n🔴 Отключение систем. До свидания!")
-        
+
+        # Останавливаем воспроизведение аудио если что-то играло
+        try:
+            self.streamer.stop()
+        except Exception:
+            pass
+
         try:
             farewell_text = "Отключаю питание. До свидания."
-            self.tts.speak(farewell_text) # Прощаемся голосом
+            self.tts.speak(farewell_text)
         except BaseException:
             # Игнорируем ошибки при выходе (повторный Ctrl+C, конфликты потоков)
             pass
@@ -115,6 +125,9 @@ class VoiceAssistant:
     def _process(self, text):
         if not text:
             return
+
+        # Останавливаем любое текущее воспроизведение перед обработкой новой команды
+        self.streamer.stop()
 
         # --- Системные команды ---
         reboot_words = ["перезагрузи", "перезагрузка", "ребут", "reboot"]

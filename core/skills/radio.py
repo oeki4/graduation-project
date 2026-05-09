@@ -1,10 +1,5 @@
 import os
-import sys
 import requests
-
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from audio_streamer import AudioStreamer
 
 # Серверы radio-browser.info API (используем по очереди при сбоях)
 _API_SERVERS = [
@@ -68,8 +63,7 @@ def _module_radio(parsed_data, assistant):
     # Регистрируем клик (хорошая практика для radio-browser.info)
     _register_click(station.get("stationuuid", ""))
 
-    streamer = AudioStreamer(assistant)
-    if not streamer.play_url(url):
+    if not assistant.streamer.play_url(url):
         assistant.tts.speak("Не удалось запустить радио. Попробуйте другую станцию.")
 
 
