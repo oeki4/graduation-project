@@ -11,25 +11,33 @@ _STOP_WORDS = {
     "погода", "погоду", "погоды", "погодка", "погодку", "прогноз", "прогнозу", "прогноза",
     # вопросительные/командные глаголы
     "какая", "какой", "какое", "какие", "будет", "будут",
+    "была", "был", "было", "были",
     "узнать", "узнай", "скажи", "расскажи", "хочу", "знать",
+    # «городе/город» — часто вставляют «погода в городе москва»
+    "город", "городе", "города", "городу",
     # предлоги/частицы
     "в", "во", "на", "о", "об", "про", "за", "под",
     # вежливость
     "пожалуйста", "плиз", "плз",
 }
 
-# Временные маркеры → нормализованное значение
-_TIME_KEYWORDS = {
-    "сейчас":      "сейчас",
-    "сегодня":     "сегодня",
-    "завтра":      "завтра",
-    "послезавтра": "послезавтра",
-    "вечером":     "вечером",
-    "утром":       "утром",
-    "днём":        "днём",
-    "днем":        "днём",
-    "ночью":       "ночью",
+# Временные маркеры → (смещение дня, час дня или None для текущей)
+# Поддерживаются: сегодня (0), завтра (1), послезавтра (2).
+# Вчера/прошлое не поддерживается (wttr.in исторических данных не отдаёт).
+_TIME_MAP = {
+    "сейчас":      (0, None),
+    "сегодня":     (0, None),
+    "завтра":      (1, 12),   # полдень завтра
+    "послезавтра": (2, 12),
+    "вчера":       (-1, None),
+    "утром":       (0, 6),
+    "днём":        (0, 12),
+    "днем":        (0, 12),
+    "вечером":     (0, 18),
+    "ночью":       (0, 0),
 }
+
+_TIME_KEYWORDS = set(_TIME_MAP.keys())
 
 
 def setup(router):
@@ -54,7 +62,7 @@ def _module_weather(parsed_data, assistant):
         assistant.speak("Не понял, для какого города узнать погоду. Уточните, пожалуйста.")
         return
 
-    weather = _fetch_weather(target_city)
+    weather = _fetch_weather(target_city, target_time)
     if not weather:
         assistant.speak(f"Не удалось получить погоду для города {target_city}.")
         return
@@ -70,9 +78,9 @@ def _module_weather(parsed_data, assistant):
 
 def _extract_time(text: str) -> str:
     """Ищет временной маркер в тексте, по умолчанию — «сегодня»."""
-    for keyword, normalized in _TIME_KEYWORDS.items():
+    for keyword in _TIME_KEYWORDS:
         if re.search(rf"\b{keyword}\b", text):
-            return normalized
+            return keyword
     return "сегодня"
 
 
@@ -92,7 +100,7 @@ def _extract_city(text: str) -> str | None:
          «нижнем новгороде» → «нижний новгород»,
          «санкт-петербурге» → «санкт-петербург».
     """
-    excluded = _STOP_WORDS | set(_TIME_KEYWORDS.keys())
+    excluded = _STOP_WORDS | _TIME_KEYWORDS
 
     # 1. Паттерн «в|во|на <город из 1–3 слов>»
     m = re.search(
@@ -167,14 +175,23 @@ def _degrees_form(n: int) -> str:
     return "градусов"
 
 
-def _fetch_weather(city: str) -> str | None:
+def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
     """
     Возвращает описание погоды для города на русском, удобное для TTS.
-    Использует JSON API wttr.in (format=j1) — там есть поле lang_ru
-    с переводом погодных условий, в отличие от текстового %C.
+    Использует JSON API wttr.in (format=j1):
+      - current_condition  — текущая погода
+      - weather[0..2]      — прогноз на сегодня/завтра/послезавтра
+                              с почасовой разбивкой (8 точек по 3 часа)
 
     Возвращает строку вида «плюс 11 градусов, облачно».
     """
+    day_offset, hour = _TIME_MAP.get(time_key, (0, None))
+
+    # wttr.in не отдаёт исторических данных — на «вчера» отвечаем явно
+    if day_offset < 0:
+        print("⚠️  [ПОГОДА] wttr.in не предоставляет данные за прошлое.")
+        return "к сожалению, данные о погоде в прошлом недоступны"
+
     try:
         response = requests.get(
             f"https://wttr.in/{city}",
@@ -184,21 +201,36 @@ def _fetch_weather(city: str) -> str | None:
         )
         response.raise_for_status()
         data = response.json()
-        current = data.get("current_condition", [{}])[0]
 
-        # Температура в Цельсиях
-        temp_str = current.get("temp_C", "")
+        # Выбираем источник: текущая погода или почасовой прогноз
+        if day_offset == 0 and hour is None:
+            condition = data.get("current_condition", [{}])[0]
+        else:
+            forecast_days = data.get("weather", [])
+            if day_offset >= len(forecast_days):
+                return None
+            day_data = forecast_days[day_offset]
+            hourly = day_data.get("hourly", [])
+            if not hourly:
+                return None
+            # Почасовка идёт шагом 3 часа: hourly[0]=00:00, [4]=12:00, [6]=18:00
+            target_hour = 12 if hour is None else hour
+            idx = max(0, min(len(hourly) - 1, target_hour // 3))
+            condition = hourly[idx]
+
+        # Температура: в current_condition поле «temp_C», в hourly — «tempC»
+        temp_str = condition.get("temp_C") or condition.get("tempC")
         if not temp_str:
             return None
         temp = int(temp_str)
 
         # Описание на русском (lang_ru заполняется при ?lang=ru)
         desc = ""
-        if current.get("lang_ru"):
-            desc = current["lang_ru"][0].get("value", "")
+        if condition.get("lang_ru"):
+            desc = condition["lang_ru"][0].get("value", "")
         if not desc:
             # Фоллбэк на английский, если перевода вдруг нет
-            desc = current.get("weatherDesc", [{}])[0].get("value", "")
+            desc = condition.get("weatherDesc", [{}])[0].get("value", "")
 
         # Преобразуем в форму, удобную для TTS (число прописью + правильное окончание):
         # «+11°C, Облачно» → «плюс одиннадцать градусов, облачно»
