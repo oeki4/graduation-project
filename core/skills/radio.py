@@ -63,7 +63,7 @@ def _module_radio(parsed_data, assistant):
     # Регистрируем клик (хорошая практика для radio-browser.info)
     _register_click(station.get("stationuuid", ""))
 
-    if not assistant.streamer.play_url(url):
+    if not assistant.streamer.play_stream(url):
         assistant.tts.speak("Не удалось запустить радио. Попробуйте другую станцию.")
 
 

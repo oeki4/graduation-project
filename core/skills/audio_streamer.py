@@ -16,10 +16,59 @@ except ImportError:
     print("⚠️ [STREAMER] Библиотека miniaudio не установлена. "
           "Для работы на Windows выполните: pip install miniaudio")
 
-# Размер начального буфера перед стартом воспроизведения.
-# 512 КБ ≈ 30–60 секунд аудио при 64–128 кбит/с — этого достаточно,
-# чтобы начать играть немедленно, пока остаток файла докачивается.
-_PREBUFFER_BYTES = 512 * 1024
+# Размер начального буфера перед стартом воспроизведения для файлов (сказки).
+# 64 КБ ≈ 4 сек аудио при 128 кбит/с — достаточно, чтобы начать играть быстро.
+_PREBUFFER_BYTES = 64 * 1024
+
+# Размер порции фреймов при стриминге радио (фреймов PCM за один вызов)
+_RADIO_FRAMES_PER_READ = 4096
+
+
+class _HttpStream(io.RawIOBase):
+    """
+    Обёртка над requests-стримингом как файлоподобный объект для miniaudio.
+    Позволяет декодировать аудио по мере загрузки без ожидания полного скачивания.
+    """
+
+    def __init__(self, url: str, stop_event: threading.Event):
+        self._stop = stop_event
+        self._buf = b""
+        self._exhausted = False
+        self._response = requests.get(
+            url, stream=True, timeout=15,
+            headers={"User-Agent": "VoiceAssistant/1.0"},
+        )
+        self._response.raise_for_status()
+        self._iter = self._response.iter_content(chunk_size=8192)
+
+    def readinto(self, b):
+        if self._stop.is_set() or self._exhausted:
+            return 0
+        # Дочитываем из буфера или загружаем следующий чанк
+        while len(self._buf) < len(b):
+            try:
+                chunk = next(self._iter)
+                if chunk:
+                    self._buf += chunk
+            except StopIteration:
+                self._exhausted = True
+                break
+        n = min(len(b), len(self._buf))
+        if n == 0:
+            return 0
+        b[:n] = self._buf[:n]
+        self._buf = self._buf[n:]
+        return n
+
+    def readable(self):
+        return True
+
+    def close(self):
+        try:
+            self._response.close()
+        except Exception:
+            pass
+        super().close()
 
 
 class AudioStreamer:
@@ -49,14 +98,35 @@ class AudioStreamer:
     # ------------------------------------------------------------------
 
     def play_url(self, url: str) -> bool:
-        """Воспроизводит аудио по прямой URL-ссылке."""
+        """Воспроизводит аудиофайл по URL (двухфазный буфер — для сказок)."""
         self.stop()
-        print(f"🎵 [STREAMER] Запуск воспроизведения: {url}")
+        print(f"🎵 [STREAMER] Запуск воспроизведения файла: {url}")
 
         if os.name == 'nt':
             return self._play_windows(url)
         else:
             return self._play_linux(url)
+
+    def play_stream(self, url: str) -> bool:
+        """
+        Истинный стриминг для живого радио (бесконечный поток).
+        Декодирует и воспроизводит MP3 по мере получения данных —
+        воспроизведение начинается через ~1–2 сек после вызова.
+        """
+        self.stop()
+        if not _MINIAUDIO_AVAILABLE:
+            print("❌ [STREAMER] miniaudio не установлен: pip install miniaudio")
+            return False
+
+        print(f"📻 [STREAMER] Запуск радио стриминга: {url}")
+        self._stop_event = threading.Event()
+        self._playback_thread = threading.Thread(
+            target=self._stream_radio,
+            args=(url, self._stop_event),
+            daemon=True,
+        )
+        self._playback_thread.start()
+        return True
 
     def stop(self):
         """Останавливает текущее воспроизведение."""
@@ -81,7 +151,66 @@ class AudioStreamer:
                 self._current_playback_process = None
 
     # ------------------------------------------------------------------
-    # Windows: двухфазный стриминг
+    # Радио: истинный HTTP-стриминг без буферизации полного файла
+    # ------------------------------------------------------------------
+
+    def _stream_radio(self, url: str, stop_event: threading.Event):
+        """
+        Фоновый поток: открывает HTTP-поток, декодирует MP3 порциями
+        через miniaudio и сразу отдаёт PCM в sounddevice.
+        Задержка до старта воспроизведения ≈ 1–2 сек.
+        """
+        http_stream = None
+        try:
+            http_stream = _HttpStream(url, stop_event)
+            buffered = io.BufferedReader(http_stream, buffer_size=32768)
+
+            ma_stream = miniaudio.stream_any(
+                buffered,
+                source_format=miniaudio.FileFormat.MP3,
+                output_format=miniaudio.SampleFormat.SIGNED16,
+                nchannels=2,
+                sample_rate=44100,
+                frames_to_read=_RADIO_FRAMES_PER_READ,
+            )
+
+            # Берём первый фрейм чтобы узнать реальные параметры потока
+            first = next(ma_stream, None)
+            if first is None or stop_event.is_set():
+                return
+
+            channels = first.nchannels
+            rate = first.sample_rate
+            print(f"▶️  [STREAMER] Радио: {rate} Гц, {channels} кан. — начало воспроизведения")
+
+            with sd.OutputStream(samplerate=rate, channels=channels, dtype='int16') as out:
+                # Воспроизводим первый фрейм
+                audio = np.frombuffer(first.samples, dtype=np.int16)
+                if channels > 1:
+                    audio = audio.reshape(-1, channels)
+                out.write(audio)
+
+                # Непрерывно читаем и воспроизводим остальные фреймы
+                for frame in ma_stream:
+                    if stop_event.is_set():
+                        break
+                    audio = np.frombuffer(frame.samples, dtype=np.int16)
+                    if channels > 1:
+                        audio = audio.reshape(-1, channels)
+                    out.write(audio)
+
+            print("✅ [STREAMER] Радио: поток завершён.")
+
+        except requests.RequestException as e:
+            print(f"❌ [STREAMER] Ошибка подключения к радио: {e}")
+        except Exception as e:
+            print(f"❌ [STREAMER] Ошибка стриминга: {e}")
+        finally:
+            if http_stream:
+                http_stream.close()
+
+    # ------------------------------------------------------------------
+    # Windows: двухфазный стриминг (для файлов — сказки)
     # ------------------------------------------------------------------
 
     def _play_windows(self, url: str) -> bool:

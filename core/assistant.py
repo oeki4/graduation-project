@@ -20,6 +20,9 @@ class VoiceAssistant:
         # Укажите путь к вашему звуковому файлу (желательно .wav)
         self.startup_sound_path = "./assets/start.mp3"
 
+        # Флаг: TTS сейчас говорит → голосовой ввод игнорируется (защита от эха)
+        self._is_speaking = False
+
         print("⚙️ Инициализация систем...")
         try:
             self.tts = TTSEngine(speaker='aidar')
@@ -32,6 +35,21 @@ class VoiceAssistant:
         except FileNotFoundError as e:
             print(f"❌ Критическая ошибка: {e}")
             sys.exit(1)
+
+    def speak(self, text: str):
+        """
+        Произносит текст через TTS с защитой от эха.
+        Пока ассистент говорит, голосовой ввод игнорируется —
+        это предотвращает ситуацию, когда микрофон подхватывает
+        голос TTS и интерпретирует его как новую команду.
+        Используйте этот метод вместо self.tts.speak() везде, где
+        нужна защита (в навыках: assistant.speak(...)).
+        """
+        self._is_speaking = True
+        try:
+            self.tts.speak(text)
+        finally:
+            self._is_speaking = False
 
     def _play_sound(self, file_path):
         """Внутренний метод для воспроизведения аудиофайлов."""
@@ -75,7 +93,7 @@ class VoiceAssistant:
         print("🎵 Воспроизведение звука запуска...")
         self._play_sound(self.startup_sound_path)
 
-        self.tts.speak(greeting_text)
+        self.speak(greeting_text)
 
         # Запускаем консольный слушатель в отдельном потоке
         threading.Thread(target=self._console_listener, daemon=True).start()
@@ -87,6 +105,9 @@ class VoiceAssistant:
 
                 if result["type"] == "final":
                     text = result["text"].lower()
+                    # Пропускаем, если TTS сейчас говорит (защита от эха)
+                    if self._is_speaking:
+                        continue
                     print(f"👤 Вы: {text}")
                     if self.name in text:
                         clean_text = text.replace(self.name, "").strip()
@@ -233,21 +254,21 @@ class VoiceAssistant:
                  "хватит", "отстань", "тихо", "stop"):
             print("⏹️  [SYSTEM] Стоп.")
             self.streamer.stop()
-            self.tts.speak("Остановлено.")
+            self.speak("Остановлено.")
             return
 
         # Громкость выше
         if t in ("громче", "сделай громче", "прибавь громкость",
                  "прибавь", "погромче"):
             self._volume_up()
-            self.tts.speak("Громче.")
+            self.speak("Громче.")
             return
 
         # Громкость ниже
         if t in ("тише", "сделай тише", "убавь громкость",
                  "убавь", "потише"):
             self._volume_down()
-            self.tts.speak("Тише.")
+            self.speak("Тише.")
             return
 
         # Установить конкретный уровень громкости: «громкость 50»
@@ -255,9 +276,9 @@ class VoiceAssistant:
             level = self._parse_volume_level(t)
             if level is not None:
                 self._set_volume(level)
-                self.tts.speak(f"Громкость {level} процентов.")
+                self.speak(f"Громкость {level} процентов.")
             else:
-                self.tts.speak("Не понял уровень громкости. Скажите, например: громкость пятьдесят.")
+                self.speak("Не понял уровень громкости. Скажите, например: громкость пятьдесят.")
             return
 
         # ── 2. Все остальные команды прерывают текущее воспроизведение ─
@@ -266,13 +287,13 @@ class VoiceAssistant:
         # ── 3. Системные команды ───────────────────────────────────────
         if any(w in t for w in ("перезагрузи", "перезагрузка", "ребут", "reboot")):
             print("🔄 [SYSTEM] Перезагрузка системы...")
-            self.tts.speak("Перезагружаю систему. Скоро вернусь.")
+            self.speak("Перезагружаю систему. Скоро вернусь.")
             os.system("sudo reboot" if os.name == 'posix' else "shutdown /r /t 0")
             return
 
         if any(w in t for w in ("выключи", "выключить", "отключи питание", "power off")):
             print("🔴 [SYSTEM] Выключение системы...")
-            self.tts.speak("Выключаю питание. До свидания.")
+            self.speak("Выключаю питание. До свидания.")
             os.system("sudo shutdown -h now" if os.name == 'posix' else "shutdown /s /t 0")
             return
 
