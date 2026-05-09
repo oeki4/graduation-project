@@ -1,22 +1,27 @@
 """
-Навык: поиск рецепта по запросу пользователя.
+Навык: поиск рецепта / информации о блюде.
 
-Источник данных: povarenok.ru (поиск через HTTP, без API-ключа).
-Структура страницы рецепта использует Schema.org Recipe markup,
-поэтому ингредиенты извлекаются регулярными выражениями стабильно.
+Источник данных: Russian Wikipedia REST API.
+Почему не povarenok.ru / eda.ru: они блокируют HTTP-запросы без браузера
+(Cloudflare → 403). Wikipedia отдаёт стабильный JSON без ключа,
+поддерживает русский язык и имеет статьи о подавляющем большинстве
+популярных блюд (борщ, плов, оливье, пицца, лазанья и т. д.).
+
+Wikipedia не даёт пошаговый рецепт — она даёт краткое описание блюда,
+типичные ингредиенты и ссылку на полную статью. Для голосового
+интерфейса это даже удобнее: длинные пошаговые инструкции на слух
+воспринимаются плохо.
 """
 
 import re
 import urllib.parse
 import requests
 
-_BASE_URL = "https://www.povarenok.ru"
-_SEARCH_URL = f"{_BASE_URL}/recipes/search/"
+_WIKI_API   = "https://ru.wikipedia.org/w/api.php"
+_WIKI_SUMM  = "https://ru.wikipedia.org/api/rest_v1/page/summary/"
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "VoiceAssistant/1.0 (graduation-project)",
     "Accept-Language": "ru,en;q=0.5",
 }
 
@@ -27,19 +32,21 @@ _STOP_WORDS = {
     "покажи", "показать", "дай", "дайте", "хочу", "нужен", "нужна",
     "поделись", "предложи", "посоветуй", "помоги", "выбрать",
     "расскажи", "узнать",
+    # вопросительные слова
+    "как", "какой", "какая", "какое", "какие",
+    "что", "что-нибудь", "чего", "чему",
     # понятия рецепта
     "рецепт", "рецепта", "рецепты", "рецептом",
-    "блюдо", "блюда", "блюдом", "что-нибудь", "что", "какой-нибудь",
-    "приготовить", "приготовь", "сделать", "сделай",
+    "блюдо", "блюда", "блюдом", "какой-нибудь",
+    "приготовить", "приготовь", "сделать", "сделай", "делать",
     "испечь", "испеки", "испеку",
-    # категории/типы (оставляем — могут быть запросом)
-    # «суп», «салат» — НЕ стоп-слова
+    "можно", "будет",
     # обороты
-    "из", "на", "с", "со", "для", "к", "ко",
+    "из", "на", "с", "со", "для", "к", "ко", "и", "или",
     "пожалуйста", "плиз",
     # местоимения
-    "мне", "нам", "ты", "мы",
-    # время приёма пищи (это, скорее, контекст)
+    "мне", "нам", "ты", "мы", "его",
+    # время приёма пищи (контекст, а не блюдо)
     "завтрак", "обед", "ужин",
 }
 
@@ -57,36 +64,34 @@ def _module_recipe(parsed_data, assistant):
     text = parsed_data.get("original_text", "").lower().strip()
 
     query = _extract_query(text)
-    print(f"🍳 [РЕЦЕПТ] Запрос: '{text}' → ключ поиска: '{query or '(не задан)'}'")
+    print(f"🍳 [РЕЦЕПТ] Запрос: '{text}' → поиск: '{query or '(не задан)'}'")
 
     if not query:
         assistant.speak("Не поняла, какой рецепт найти. Уточните, пожалуйста.")
         return
 
-    assistant.speak(f"Ищу рецепт {query}, одну секунду.")
+    assistant.speak(f"Ищу информацию о {query}, одну секунду.")
 
-    recipe = _search_recipe(query)
-    if not recipe:
-        assistant.speak(f"К сожалению, не удалось найти рецепт {query}.")
+    info = _search_wikipedia(query)
+    if not info:
+        assistant.speak(f"К сожалению, ничего не нашла по запросу {query}.")
         return
 
-    title = recipe["title"]
-    ingredients = recipe["ingredients"]
-    url = recipe["url"]
+    title   = info["title"]
+    extract = info["extract"]
+    url     = info["url"]
 
     print(f"   ✅ Найдено: {title}")
     print(f"   URL: {url}")
-    print(f"   Ингредиенты ({len(ingredients)}): {', '.join(ingredients[:10])}")
+    print(f"   Аннотация: {extract[:200]}{'...' if len(extract) > 200 else ''}")
 
-    # Озвучиваем основные ингредиенты (не больше 8 — чтобы не утомлять)
-    if ingredients:
-        ing_short = ", ".join(ingredients[:8])
-        spoken = (f"Нашла рецепт. {title}. "
-                  f"Основные ингредиенты: {ing_short}. "
-                  f"Полный рецепт смотрите на сайте поваренок ру.")
+    # Берём первые 2 предложения из аннотации — больше TTS не вытянет
+    short = _first_sentences(extract, n=2)
+    if not short:
+        spoken = (f"Нашла статью {title}, но описание недоступно. "
+                  f"Подробности на Википедии.")
     else:
-        spoken = (f"Нашла рецепт. {title}. "
-                  f"Подробности смотрите на сайте поваренок ру.")
+        spoken = f"{title}. {short} Подробности на Википедии."
 
     assistant.speak(spoken)
 
@@ -101,10 +106,10 @@ def _extract_query(text: str) -> str:
     название блюда или ингредиент.
 
     Примеры:
-      «найди рецепт борща»          → «борща»
-      «как приготовить плов»        → «плов»
-      «что приготовить из курицы»   → «курицы»
-      «рецепт салата цезарь»        → «салата цезарь»
+      «как приготовить оливье»     → «оливье»
+      «найди рецепт борща»         → «борща»
+      «что приготовить из курицы»  → «курицы»
+      «рецепт пиццы»               → «пиццы»
     """
     words = re.findall(r"[а-яёa-z][а-яёa-z-]+", text)
     significant = [w for w in words if w not in _STOP_WORDS]
@@ -112,83 +117,94 @@ def _extract_query(text: str) -> str:
 
 
 # ------------------------------------------------------------------
-# Скрейпер povarenok.ru
+# Wikipedia REST API
 # ------------------------------------------------------------------
 
-def _search_recipe(query: str) -> dict | None:
+def _search_wikipedia(query: str) -> dict | None:
     """
-    Ищет рецепт на povarenok.ru, открывает первый результат и возвращает:
-        {
-            "title":       "Борщ украинский",
-            "ingredients": ["свёкла", "капуста", ...],
-            "url":         "https://www.povarenok.ru/recipes/show/12345/",
-        }
-    Возвращает None при ошибке сети или если результатов нет.
+    Ищет статью в русской Википедии.
+
+    1. opensearch  — находит точное название статьи по запросу
+                    (например: «борща» → «Борщ», «оливье» → «Оливье (салат)»)
+    2. summary REST — возвращает краткую аннотацию найденной статьи
+
+    Возвращает {"title", "extract", "url"} или None.
     """
-    # 1. Поиск
+    # ── 1. opensearch: ищем заголовок статьи ──────────────────────
     try:
-        params = {"name": query}
-        print(f"🔍 [ПОВАРЁНОК] Поиск: {_SEARCH_URL}?name={urllib.parse.quote(query)}")
-        response = requests.get(_SEARCH_URL, params=params,
-                                headers=_HEADERS, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"❌ [ПОВАРЁНОК] Ошибка поиска: {e}")
-        return None
-
-    # 2. Извлекаем URL первого рецепта (паттерн /recipes/show/<id>/)
-    match = re.search(r'href="(/recipes/show/\d+/[^"]*)"', response.text)
-    if not match:
-        print("⚠️  [ПОВАРЁНОК] В выдаче нет ни одного рецепта.")
-        return None
-
-    recipe_url = _BASE_URL + match.group(1)
-    print(f"   → Открываю рецепт: {recipe_url}")
-
-    # 3. Загружаем страницу рецепта
-    try:
-        page = requests.get(recipe_url, headers=_HEADERS, timeout=10)
-        page.raise_for_status()
-        html = page.text
-    except requests.RequestException as e:
-        print(f"❌ [ПОВАРЁНОК] Ошибка загрузки рецепта: {e}")
-        return None
-
-    # 4. Заголовок: <h1 itemprop="name">...</h1>
-    title_match = re.search(
-        r'<h1[^>]*itemprop="name"[^>]*>([^<]+)</h1>', html
-    )
-    title = title_match.group(1).strip() if title_match else query
-
-    # 5. Ингредиенты: <span itemprop="recipeIngredient">...</span>
-    # На povarenok.ru каждое поле часто имеет itemprop="recipeIngredient",
-    # либо они оформлены ссылками внутри блока ингредиентов.
-    ingredients = re.findall(
-        r'itemprop="recipeIngredient"[^>]*>([^<]+)<',
-        html,
-    )
-    if not ingredients:
-        # Запасной паттерн — ссылки в блоке ингредиентов
-        ingredients = re.findall(
-            r'<a[^>]*class="[^"]*ingredient[^"]*"[^>]*>([^<]+)</a>',
-            html,
+        search_resp = requests.get(
+            _WIKI_API,
+            params={
+                "action":    "opensearch",
+                "search":    query,
+                "limit":     5,           # берём топ-5 на случай неоднозначности
+                "namespace": 0,
+                "format":    "json",
+            },
+            headers=_HEADERS,
+            timeout=8,
         )
+        search_resp.raise_for_status()
+        data = search_resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"❌ [WIKIPEDIA] Ошибка поиска: {e}")
+        return None
 
-    # Чистим: лишние пробелы, дубликаты, пустые
-    ingredients = [_clean(ing) for ing in ingredients]
-    ingredients = [ing for ing in ingredients if ing]
-    ingredients = list(dict.fromkeys(ingredients))  # убираем дубли с порядком
+    # opensearch возвращает массив [query, [titles], [descriptions], [urls]]
+    if len(data) < 4 or not data[1]:
+        print(f"⚠️  [WIKIPEDIA] По запросу '{query}' статей не найдено.")
+        return None
+
+    titles = data[1]
+    urls   = data[3]
+
+    # Берём первый результат, но если в нём есть disambiguation —
+    # пробуем следующий
+    chosen_title = titles[0]
+    chosen_url   = urls[0]
+    for t, u in zip(titles, urls):
+        if "значения" not in t.lower():
+            chosen_title, chosen_url = t, u
+            break
+
+    # ── 2. summary REST: получаем аннотацию ───────────────────────
+    try:
+        title_path = urllib.parse.quote(chosen_title.replace(" ", "_"))
+        summ_resp = requests.get(
+            _WIKI_SUMM + title_path,
+            headers=_HEADERS,
+            timeout=8,
+        )
+        summ_resp.raise_for_status()
+        summ = summ_resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"❌ [WIKIPEDIA] Ошибка получения аннотации: {e}")
+        return None
+
+    extract = summ.get("extract", "").strip()
+    if not extract:
+        return None
 
     return {
-        "title": _clean(title),
-        "ingredients": ingredients,
-        "url": recipe_url,
+        "title":   chosen_title,
+        "extract": extract,
+        "url":     chosen_url,
     }
 
 
-def _clean(s: str) -> str:
-    """Снимает HTML-сущности и лишние пробелы."""
-    s = s.replace("&nbsp;", " ").replace("&amp;", "&")
-    s = s.replace("&laquo;", "«").replace("&raquo;", "»")
-    s = s.replace("&mdash;", "—").replace("&ndash;", "–")
-    return " ".join(s.split()).strip()
+# ------------------------------------------------------------------
+# Утилиты
+# ------------------------------------------------------------------
+
+def _first_sentences(text: str, n: int = 2) -> str:
+    """
+    Возвращает первые n предложений текста.
+    Учитывает русские особенности (точки в сокращениях не разделяют).
+    """
+    if not text:
+        return ""
+    # Убираем заголовки в скобках, навязчивые пометки
+    text = re.sub(r"\s*\([^)]*\)", "", text)
+    # Простое разделение по точке-восклицательному-вопросительному + пробел
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    return " ".join(sentences[:n]).strip()
