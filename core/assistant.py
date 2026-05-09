@@ -25,7 +25,7 @@ class VoiceAssistant:
 
         print("⚙️ Инициализация систем...")
         try:
-            self.tts = TTSEngine(speaker='aidar')
+            self.tts = TTSEngine()  # speaker='xenia' по умолчанию
             self.recognizer = SpeechRecognizer()
             self.parser = IntentParser(model_path="./nlp/models/intent_model")
             self.router = CommandRouter()
