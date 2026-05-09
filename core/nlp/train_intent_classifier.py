@@ -1,7 +1,7 @@
 """
 Скрипт для обучения TextCategorizer для определения интентов голосового ассистента.
 Поддерживаемые интенты: включить_сказку, узнать_погоду, включить_радио,
-                       найти_рецепт, другой_интент.
+                       поставить_таймер, другой_интент.
 """
 import spacy
 from spacy.training import Example
@@ -35,13 +35,13 @@ def create_training_data():
     fairytale_examples = _load_examples("fairytale.txt", "включить_сказку")
     weather_examples   = _load_examples("weather.txt",   "узнать_погоду")
     radio_examples     = _load_examples("radio.txt",     "включить_радио")
-    recipe_examples    = _load_examples("recipe.txt",    "найти_рецепт")
+    timer_examples     = _load_examples("timer.txt",     "поставить_таймер")
     other_examples     = _load_examples("other.txt",     "другой_интент")
 
     # Базовый шаблон ярлыков (все нули) — копируем и ставим 1.0 у нужного
     def _cats(active_label: str) -> dict:
         labels = ["включить_сказку", "узнать_погоду", "включить_радио",
-                  "найти_рецепт", "другой_интент"]
+                  "поставить_таймер", "другой_интент"]
         return {label: (1.0 if label == active_label else 0.0) for label in labels}
 
     training_data = []
@@ -51,8 +51,8 @@ def create_training_data():
         training_data.append({"text": text, "cats": _cats("узнать_погоду")})
     for text in radio_examples:
         training_data.append({"text": text, "cats": _cats("включить_радио")})
-    for text in recipe_examples:
-        training_data.append({"text": text, "cats": _cats("найти_рецепт")})
+    for text in timer_examples:
+        training_data.append({"text": text, "cats": _cats("поставить_таймер")})
     for text in other_examples:
         training_data.append({"text": text, "cats": _cats("другой_интент")})
 
@@ -71,7 +71,7 @@ def evaluate_model(nlp, validation_examples):
     
     # Метрики для каждой категории
     categories = ["включить_сказку", "узнать_погоду", "включить_радио",
-                  "найти_рецепт", "другой_интент"]
+                  "поставить_таймер", "другой_интент"]
     category_metrics = {cat: {"tp": 0, "fp": 0, "fn": 0} for cat in categories}
     
     for example in validation_examples:
@@ -180,7 +180,7 @@ def train_model(output_dir="models/intent_model", n_iter=40, patience=10, train_
     textcat.add_label("включить_сказку")
     textcat.add_label("узнать_погоду")
     textcat.add_label("включить_радио")
-    textcat.add_label("найти_рецепт")
+    textcat.add_label("поставить_таймер")
     textcat.add_label("другой_интент")
     
     # Создаём обучающие данные
@@ -190,7 +190,7 @@ def train_model(output_dir="models/intent_model", n_iter=40, patience=10, train_
     print(f"  - Примеров 'включить_сказку': {sum(1 for ex in training_data if ex['cats']['включить_сказку'] == 1.0)}")
     print(f"  - Примеров 'узнать_погоду':  {sum(1 for ex in training_data if ex['cats']['узнать_погоду'] == 1.0)}")
     print(f"  - Примеров 'включить_радио': {sum(1 for ex in training_data if ex['cats']['включить_радио'] == 1.0)}")
-    print(f"  - Примеров 'найти_рецепт':   {sum(1 for ex in training_data if ex['cats']['найти_рецепт'] == 1.0)}")
+    print(f"  - Примеров 'поставить_таймер':   {sum(1 for ex in training_data if ex['cats']['поставить_таймер'] == 1.0)}")
     print(f"  - Примеров 'другой_интент':  {sum(1 for ex in training_data if ex['cats']['другой_интент'] == 1.0)}")
     
     # Преобразуем данные в формат Example
@@ -414,15 +414,15 @@ def test_model(nlp, test_texts):
         "расскажи какая погода сегодня": "узнать_погоду",
         "покажи прогноз": "узнать_погоду",
         
-        # Положительные примеры рецептов
-        "найди рецепт борща": "найти_рецепт",
-        "рецепт пельменей": "найти_рецепт",
-        "как приготовить плов": "найти_рецепт",
-        "что приготовить на ужин": "найти_рецепт",
-        "что приготовить из курицы": "найти_рецепт",
-        "посоветуй блюдо": "найти_рецепт",
-        "рецепт салата": "найти_рецепт",
-        "хочу рецепт пиццы": "найти_рецепт",
+        # Положительные примеры таймеров
+        "поставь таймер на 5 минут": "поставить_таймер",
+        "таймер на 30 секунд": "поставить_таймер",
+        "запусти таймер на 10 минут": "поставить_таймер",
+        "засеки 3 минуты": "поставить_таймер",
+        "разбуди через час": "поставить_таймер",
+        "напомни через 15 минут": "поставить_таймер",
+        "таймер на 2 часа": "поставить_таймер",
+        "отмени таймер": "поставить_таймер",
 
         # Отрицательные примеры
         "включи музыку": "другой_интент",
@@ -438,7 +438,7 @@ def test_model(nlp, test_texts):
     }
     
     categories = ["включить_сказку", "узнать_погоду", "включить_радио",
-                  "найти_рецепт", "другой_интент"]
+                  "поставить_таймер", "другой_интент"]
 
     for text in test_texts:
         doc = nlp(text)
@@ -463,7 +463,7 @@ def test_model(nlp, test_texts):
         print(f"   Все scores: сказка={scores['включить_сказку']:.2%}, "
               f"погода={scores['узнать_погоду']:.2%}, "
               f"радио={scores['включить_радио']:.2%}, "
-              f"рецепт={scores['найти_рецепт']:.2%}, "
+              f"таймер={scores['поставить_таймер']:.2%}, "
               f"другое={scores['другой_интент']:.2%}")
         if expected != "неизвестно":
             print(f"   Ожидалось: {expected}")
@@ -557,15 +557,15 @@ if __name__ == "__main__":
         "что ты умеешь",
         "включи свет",
         "найди информацию",
-        # Тестовые рецепты
-        "найди рецепт борща",
-        "рецепт пельменей",
-        "как приготовить плов",
-        "что приготовить на ужин",
-        "что приготовить из курицы",
-        "посоветуй блюдо",
-        "рецепт салата",
-        "хочу рецепт пиццы",
+        # Тестовые таймеры
+        "поставь таймер на 5 минут",
+        "таймер на 30 секунд",
+        "запусти таймер на 10 минут",
+        "засеки 3 минуты",
+        "разбуди через час",
+        "напомни через 15 минут",
+        "таймер на 2 часа",
+        "отмени таймер",
     ]
     
     test_model(nlp, test_texts)
