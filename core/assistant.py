@@ -4,6 +4,7 @@ from command_router import CommandRouter
 from tts_engine import TTSEngine
 from skills.audio_streamer import AudioStreamer
 import sys
+import re
 import sounddevice as sd
 import soundfile as sf
 import os
@@ -145,10 +146,75 @@ class VoiceAssistant:
         if os.name == 'posix':
             os.system("amixer sset 'Master' 10%-")
         else:
-            # Симуляция нажатия медиаклавиши Volume Down (0xAE) через Windows API
             import ctypes
             ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)
+
+    @staticmethod
+    def _set_volume(level: int):
+        """
+        Устанавливает системную громкость в процентах (0–100).
+        Windows: использует pycaw (Core Audio API).
+        Linux: использует amixer.
+        """
+        level = max(0, min(100, level))
+        print(f"🔊 [SYSTEM] Установка громкости: {level}%")
+        if os.name == 'posix':
+            os.system(f"amixer sset 'Master' {level}%")
+        else:
+            try:
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                from comtypes import CLSCTX_ALL
+                from ctypes import cast, POINTER
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                volume.SetMasterVolumeLevelScalar(level / 100.0, None)
+            except ImportError:
+                print("⚠️ [SYSTEM] pycaw не установлен: pip install pycaw")
+
+    # Таблица перевода русских числительных в цифры (0–100)
+    _RU_NUMBERS = {
+        "ноль": 0, "нуль": 0,
+        "один": 1, "одна": 1,
+        "два": 2, "две": 2,
+        "три": 3, "четыре": 4, "пять": 5, "шесть": 6,
+        "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+        "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13,
+        "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16,
+        "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+        "двадцать": 20, "тридцать": 30, "сорок": 40,
+        "пятьдесят": 50, "шестьдесят": 60, "семьдесят": 70,
+        "восемьдесят": 80, "девяносто": 90, "сто": 100,
+    }
+
+    def _parse_volume_level(self, text: str) -> int | None:
+        """
+        Извлекает уровень громкости из строки вида:
+          «громкость 50», «громкость пятьдесят», «громкость пятьдесят процентов».
+        Возвращает целое 0–100 или None, если число не найдено.
+        """
+        # Убираем слово «процентов/процента/%» и «громкость»
+        t = re.sub(r"громкость|процентов|процента|%", "", text).strip()
+
+        # Цифры
+        m = re.search(r"\b(\d{1,3})\b", t)
+        if m:
+            return int(m.group(1))
+
+        # Русские числительные: может быть «двадцать пять» → 25
+        total = None
+        for word, val in self._RU_NUMBERS.items():
+            if word in t:
+                if total is None:
+                    total = val
+                else:
+                    # Складываем десятки + единицы (двадцать + пять = 25)
+                    if val < 10:
+                        total += val
+                    else:
+                        total = val
+        return total
 
     # ------------------------------------------------------------------
     # Обработка команды
@@ -182,6 +248,16 @@ class VoiceAssistant:
                  "убавь", "потише"):
             self._volume_down()
             self.tts.speak("Тише.")
+            return
+
+        # Установить конкретный уровень громкости: «громкость 50»
+        if t.startswith("громкость"):
+            level = self._parse_volume_level(t)
+            if level is not None:
+                self._set_volume(level)
+                self.tts.speak(f"Громкость {level} процентов.")
+            else:
+                self.tts.speak("Не понял уровень громкости. Скажите, например: громкость пятьдесят.")
             return
 
         # ── 2. Все остальные команды прерывают текущее воспроизведение ─
