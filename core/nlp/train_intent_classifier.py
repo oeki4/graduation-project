@@ -490,7 +490,7 @@ def test_model(nlp, test_texts):
 if __name__ == "__main__":
     # Обучаем модель с валидацией и early stopping
     # n_iter - максимум итераций, patience - сколько итераций ждать без улучшения
-    nlp = train_model(n_iter=10, patience=10, train_split=0.8)
+    nlp = train_model(n_iter=40, patience=10, train_split=0.8)
     
     # Тестируем модель на новых примерах (не из обучающего набора)
     test_texts = [
