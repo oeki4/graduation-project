@@ -20,56 +20,6 @@ except ImportError:
 # 64 КБ ≈ 4 сек аудио при 128 кбит/с — достаточно, чтобы начать играть быстро.
 _PREBUFFER_BYTES = 64 * 1024
 
-# Размер порции фреймов при стриминге радио (фреймов PCM за один вызов)
-_RADIO_FRAMES_PER_READ = 4096
-
-
-class _HttpStream(io.RawIOBase):
-    """
-    Обёртка над requests-стримингом как файлоподобный объект для miniaudio.
-    Позволяет декодировать аудио по мере загрузки без ожидания полного скачивания.
-    """
-
-    def __init__(self, url: str, stop_event: threading.Event):
-        self._stop = stop_event
-        self._buf = b""
-        self._exhausted = False
-        self._response = requests.get(
-            url, stream=True, timeout=15,
-            headers={"User-Agent": "VoiceAssistant/1.0"},
-        )
-        self._response.raise_for_status()
-        self._iter = self._response.iter_content(chunk_size=8192)
-
-    def readinto(self, b):
-        if self._stop.is_set() or self._exhausted:
-            return 0
-        # Дочитываем из буфера или загружаем следующий чанк
-        while len(self._buf) < len(b):
-            try:
-                chunk = next(self._iter)
-                if chunk:
-                    self._buf += chunk
-            except StopIteration:
-                self._exhausted = True
-                break
-        n = min(len(b), len(self._buf))
-        if n == 0:
-            return 0
-        b[:n] = self._buf[:n]
-        self._buf = self._buf[n:]
-        return n
-
-    def readable(self):
-        return True
-
-    def close(self):
-        try:
-            self._response.close()
-        except Exception:
-            pass
-        super().close()
-
 
 class AudioStreamer:
     """
@@ -156,48 +106,64 @@ class AudioStreamer:
 
     def _stream_radio(self, url: str, stop_event: threading.Event):
         """
-        Фоновый поток: открывает HTTP-поток, декодирует MP3 порциями
-        через miniaudio и сразу отдаёт PCM в sounddevice.
-        Задержка до старта воспроизведения ≈ 1–2 сек.
+        Фоновый поток: загружает MP3 чанками, декодирует каждые ~32 КБ
+        через miniaudio.decode() и сразу отдаёт PCM в sounddevice.
+        Задержка до старта воспроизведения ≈ 2 сек.
         """
-        http_stream = None
+        out_stream = None
+        response = None
         try:
-            http_stream = _HttpStream(url, stop_event)
-            buffered = io.BufferedReader(http_stream, buffer_size=32768)
-
-            ma_stream = miniaudio.stream_any(
-                buffered,
-                source_format=miniaudio.FileFormat.MP3,
-                output_format=miniaudio.SampleFormat.SIGNED16,
-                nchannels=2,
-                sample_rate=44100,
-                frames_to_read=_RADIO_FRAMES_PER_READ,
+            response = requests.get(
+                url, stream=True, timeout=15,
+                headers={"User-Agent": "VoiceAssistant/1.0"},
             )
+            response.raise_for_status()
 
-            # Берём первый фрейм чтобы узнать реальные параметры потока
-            first = next(ma_stream, None)
-            if first is None or stop_event.is_set():
-                return
+            # Порция MP3 для декодирования: 32 КБ ≈ 2 сек аудио при 128 кбит/с
+            CHUNK_BYTES = 32 * 1024
 
-            channels = first.nchannels
-            rate = first.sample_rate
-            print(f"▶️  [STREAMER] Радио: {rate} Гц, {channels} кан. — начало воспроизведения")
+            accumulator = bytearray()
+            channels = None
+            rate = None
 
-            with sd.OutputStream(samplerate=rate, channels=channels, dtype='int16') as out:
-                # Воспроизводим первый фрейм
-                audio = np.frombuffer(first.samples, dtype=np.int16)
-                if channels > 1:
-                    audio = audio.reshape(-1, channels)
-                out.write(audio)
+            for raw in response.iter_content(chunk_size=4096):
+                if stop_event.is_set():
+                    break
+                if not raw:
+                    continue
 
-                # Непрерывно читаем и воспроизводим остальные фреймы
-                for frame in ma_stream:
-                    if stop_event.is_set():
-                        break
-                    audio = np.frombuffer(frame.samples, dtype=np.int16)
-                    if channels > 1:
-                        audio = audio.reshape(-1, channels)
-                    out.write(audio)
+                accumulator.extend(raw)
+
+                if len(accumulator) < CHUNK_BYTES:
+                    continue
+
+                # Декодируем накопленный MP3-чанк
+                try:
+                    decoded = miniaudio.decode(
+                        bytes(accumulator),
+                        output_format=miniaudio.SampleFormat.SIGNED16,
+                    )
+                except miniaudio.DecodeError:
+                    # Чанк попал на середину фрейма — копим ещё
+                    continue
+
+                audio = np.frombuffer(decoded.samples, dtype=np.int16)
+                if decoded.nchannels > 1:
+                    audio = audio.reshape(-1, decoded.nchannels)
+
+                # Открываем выходной стрим на первой удачной декодировке
+                if out_stream is None:
+                    channels = decoded.nchannels
+                    rate = decoded.sample_rate
+                    out_stream = sd.OutputStream(
+                        samplerate=rate, channels=channels, dtype='int16'
+                    )
+                    out_stream.start()
+                    print(f"▶️  [STREAMER] Радио: {rate} Гц, {channels} кан. — играю")
+
+                # Отправляем PCM в sounddevice (write блокирует пока есть место в буфере)
+                out_stream.write(audio)
+                accumulator.clear()
 
             print("✅ [STREAMER] Радио: поток завершён.")
 
@@ -206,8 +172,17 @@ class AudioStreamer:
         except Exception as e:
             print(f"❌ [STREAMER] Ошибка стриминга: {e}")
         finally:
-            if http_stream:
-                http_stream.close()
+            if out_stream:
+                try:
+                    out_stream.stop()
+                    out_stream.close()
+                except Exception:
+                    pass
+            if response:
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Windows: двухфазный стриминг (для файлов — сказки)
