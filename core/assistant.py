@@ -27,6 +27,36 @@ class VoiceAssistant:
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
+
+        # Диагностика аудиоустройств — полезно при первой настройке на Pi
+        if os.environ.get("AUDIO_DEBUG"):
+            try:
+                logger.system("AUDIO", "доступные устройства:")
+                for i, dev in enumerate(sd.query_devices()):
+                    io = []
+                    if dev.get("max_input_channels", 0) > 0:
+                        io.append("in")
+                    if dev.get("max_output_channels", 0) > 0:
+                        io.append("out")
+                    print(f"     [{i}] {dev['name']:<40} ({'/'.join(io)}) "
+                          f"sr={int(dev['default_samplerate'])}")
+            except Exception as e:
+                logger.warn(f"sd.query_devices() упало: {e}")
+
+        # Если задана переменная окружения AUDIO_DEVICE — назначаем устройство
+        # для sounddevice глобально (актуально для Raspberry Pi с I²S-HAT).
+        # Можно указывать индексы (например, "0,0") или имена.
+        audio_device = os.environ.get("AUDIO_DEVICE")
+        if audio_device:
+            try:
+                parts = audio_device.split(",")
+                if len(parts) == 2:
+                    sd.default.device = (int(parts[0].strip()), int(parts[1].strip()))
+                else:
+                    sd.default.device = audio_device.strip()
+                logger.system("AUDIO", f"устройство по умолчанию: {sd.default.device}")
+            except Exception as e:
+                logger.warn(f"Не удалось установить AUDIO_DEVICE={audio_device}: {e}")
         try:
             self.tts = TTSEngine()  # speaker='xenia' по умолчанию
             self.recognizer = SpeechRecognizer()
