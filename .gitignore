@@ -5,3 +5,7 @@
 /core/.venv/
 /core/vosk-model
 .claude
+
+# Python
+__pycache__/
+*.pyc
