@@ -1,6 +1,11 @@
+import os
+import sys
 import torch
 import sounddevice as sd
 import ssl
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import logger
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -23,7 +28,7 @@ class TTSEngine:
         чуть более чистый звук, но синтез на Raspberry Pi становится в 2 раза
         медленнее (ощутимо при ответах ассистента).
         """
-        print("🔊 Загрузка голосового модуля (Silero TTS)... Это может занять пару секунд.")
+        logger.system("TTS", f"загрузка Silero v4_ru (голос: {speaker}, sr={sample_rate}) ...")
         self.device = torch.device('cpu')
         
         # Оптимизация PyTorch JIT для CPU (дает ускорение сопоставимое с ONNX)
@@ -41,7 +46,7 @@ class TTSEngine:
                 speaker='v4_ru'
             )
             self.model.to(self.device)
-            print("✅ Голосовой модуль успешно загружен.")
+            logger.system("TTS", "Silero готов")
         except Exception as e:
             print(f"❌ Ошибка загрузки Silero TTS: {e}")
             raise

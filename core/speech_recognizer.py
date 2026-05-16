@@ -5,23 +5,25 @@ import queue
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import logger
+
+
 class SpeechRecognizer:
     def __init__(self, model_path="vosk-model", samplerate=16000, device=None):
-        """
-        Инициализация распознавателя речи.
-        """
+        """Инициализация распознавателя речи."""
         self.model_path = model_path
         self.samplerate = samplerate
         self.device = device
         self.q = queue.Queue()
 
-        # Проверка наличия модели перед запуском
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Модель не найдена по пути: {self.model_path}. Пожалуйста, скачайте её.")
 
-        # Инициализация Vosk
+        logger.system("STT", f"загрузка Vosk-модели из {model_path}/")
         self.model = Model(self.model_path)
         self.recognizer = KaldiRecognizer(self.model, self.samplerate)
+        logger.system("STT", f"Vosk готов (sample rate {samplerate} Hz)")
 
     def _audio_callback(self, indata, frames, time, status):
         """Внутренний callback для передачи аудиоданных в очередь."""

@@ -1,16 +1,21 @@
+import os
+import sys
 import spacy
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import logger
+
 
 class IntentParser:
     def __init__(self, model_path="./nlp/models/intent_model"):
-        """
-        Инициализация парсера с загрузкой вашей обученной модели.
-        """
-        print(f"🧠 Загрузка кастомной NLP-модели из '{model_path}'...")
+        """Инициализация парсера с загрузкой обученной модели."""
+        logger.system("NLU", f"загрузка обученной модели из {model_path}")
         try:
             self.nlp = spacy.load(model_path)
+            labels = list(self.nlp.get_pipe("textcat").labels) if "textcat" in self.nlp.pipe_names else []
+            logger.system("NLU", f"модель загружена, классы: {', '.join(labels)}")
         except OSError:
-            print(f"⚠️ Модель '{model_path}' не найдена. Убедитесь, что скрипт обучения отработал.")
-            # Для тестирования можно загрузить стандартную модель или создать заглушку
+            logger.err(f"Модель '{model_path}' не найдена — переход на заглушку")
             self.nlp = spacy.blank("ru")
 
     def parse(self, text):

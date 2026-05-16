@@ -1,5 +1,9 @@
 import os
+import sys
 import importlib.util
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import logger
 
 class CommandRouter:
     def __init__(self):
@@ -12,7 +16,8 @@ class CommandRouter:
     def register_route(self, intent, handler):
         """Регистрирует новый обработчик для переданного интента."""
         self.routes[intent] = handler
-        print(f"🔌 Успешно зарегистрирован интент: {intent}")
+        handler_name = getattr(handler, "__module__", "?") + "." + getattr(handler, "__name__", "?")
+        logger.system("ROUTER", f"зарегистрирован интент {logger.C.BOLD}{intent}{logger.C.RESET} → {handler_name}")
 
     def load_skills(self, skills_dir="skills"):
         """
@@ -26,7 +31,7 @@ class CommandRouter:
             print(f"⚠️ Папка с навыками {skills_path} не найдена.")
             return
 
-        print("🔄 Загрузка навыков (плагинов)...")
+        logger.system("ROUTER", f"загрузка плагинов из {skills_dir}/")
         for filename in os.listdir(skills_path):
             if filename.endswith(".py") and not filename.startswith("__"):
                 module_name = filename[:-3]
@@ -53,11 +58,10 @@ class CommandRouter:
         intent = parsed_data.get("intent")
         entities = parsed_data.get("entities", {})
 
-        print(f"🔀 [ROUTER] Маршрутизация интента: {intent} | Параметры: {entities}")
-
         if intent in self.routes:
-            # Вызываем привязанную функцию и передаем ей все разобранные данные
             handler = self.routes[intent]
+            logger.system("ROUTER", f"вызов {handler.__module__}.{handler.__name__}()")
             handler(parsed_data, assistant_instance)
         else:
-            print("🤖 Ассистент: Я не совсем понял эту команду или соответствующий модуль не подключен.")
+            logger.err(f"в реестре нет обработчика для интента «{intent}»")
+            assistant_instance.speak("Я не совсем поняла эту команду.")

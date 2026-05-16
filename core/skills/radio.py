@@ -1,5 +1,9 @@
 import os
+import sys
 import requests
+
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import logger
 
 # Серверы radio-browser.info API (используем по очереди при сбоях)
 _API_SERVERS = [
@@ -32,21 +36,23 @@ def _module_radio(parsed_data, assistant):
     """Принимает команду, ищет станцию через API и запускает стриминг."""
     text = parsed_data.get("original_text", "").lower().strip()
 
+    logger.step("📻", "Навык", "radio.py")
     station_query = _extract_station_query(text)
 
     if station_query:
-        print(f"📻 [РАДИО] Ищу станцию: «{station_query}»")
-        assistant.tts.speak(f"Ищу {station_query}. Одну секунду.")
-        station = _search_station(station_query)
+        logger.detail(f"ищу станцию: «{station_query}»")
+        assistant.speak(f"Ищу {station_query}. Одну секунду.")
+        with logger.Timer("поиск через radio-browser.info"):
+            station = _search_station(station_query)
     else:
-        # Пользователь сказал просто «включи радио» без уточнения —
-        # ищем популярное русское радио
-        print("📻 [РАДИО] Станция не указана — ищу популярное русское радио.")
-        assistant.tts.speak("Включаю популярное радио.")
-        station = _search_station("", country_code="RU")
+        logger.detail("станция не указана → беру популярное русское радио")
+        assistant.speak("Включаю популярное радио.")
+        with logger.Timer("поиск через radio-browser.info"):
+            station = _search_station("", country_code="RU")
 
     if not station:
-        assistant.tts.speak("Не удалось найти радиостанцию. Проверьте подключение к интернету.")
+        logger.err("станция не найдена")
+        assistant.speak("Не удалось найти радиостанцию. Проверьте подключение к интернету.")
         return
 
     name = station["name"]
@@ -54,11 +60,11 @@ def _module_radio(parsed_data, assistant):
     codec   = station.get("codec", "")
     bitrate = station.get("bitrate", 0)
 
-    print(f"✅ [РАДИО] Найдена станция: {name}")
-    print(f"   URL: {url}")
-    print(f"   Формат: {codec}, {bitrate} кбит/с")
+    logger.ok(f"найдена: {name.strip()}")
+    logger.kv("URL", url, indent=5)
+    logger.kv("формат", f"{codec}, {bitrate} кбит/с", indent=5)
 
-    assistant.tts.speak(f"Включаю {name}.")
+    assistant.speak(f"Включаю {name}.")
 
     # Регистрируем клик (хорошая практика для radio-browser.info)
     _register_click(station.get("stationuuid", ""))

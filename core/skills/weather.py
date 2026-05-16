@@ -1,6 +1,11 @@
+import os
+import sys
 import re
 import requests
 import pymorphy3
+
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import logger
 
 # Лемматизатор инициализируем один раз — это тяжёлый объект (~50 МБ словарей)
 _morph = pymorphy3.MorphAnalyzer()
@@ -52,23 +57,28 @@ def setup(router):
 def _module_weather(parsed_data, assistant):
     text = parsed_data.get("original_text", "").lower().strip()
 
+    logger.step("🌤️ ", "Навык", "weather.py")
     target_time = _extract_time(text)
     target_city = _extract_city(text)
 
-    print(f"🌤️  [МОДУЛЬ ПОГОДЫ] Время: {target_time} | Город: {target_city or '(не указан)'}")
-    print(f"   [ОРИГИНАЛ]: {text}")
+    logger.detail(f"извлечено время: {target_time}")
+    logger.detail(f"извлечён город: {target_city or '(не указан)'}")
 
     if not target_city:
         assistant.speak("Не понял, для какого города узнать погоду. Уточните, пожалуйста.")
         return
 
-    weather = _fetch_weather(target_city, target_time)
+    logger.step("🌐", "HTTP-запрос к wttr.in", target_city)
+    with logger.Timer("ответ wttr.in"):
+        weather = _fetch_weather(target_city, target_time)
+
     if not weather:
+        logger.err("Не удалось получить погоду")
         assistant.speak(f"Не удалось получить погоду для города {target_city}.")
         return
 
+    logger.ok(f"получено: {weather}")
     spoken = f"Погода в городе {target_city} {target_time}: {weather}"
-    print(f"   ✅ {spoken}")
     assistant.speak(spoken)
 
 

@@ -3,6 +3,7 @@ from intent_parser import IntentParser
 from command_router import CommandRouter
 from tts_engine import TTSEngine
 from skills.audio_streamer import AudioStreamer
+import logger
 import sys
 import re
 import sounddevice as sd
@@ -23,7 +24,9 @@ class VoiceAssistant:
         # Флаг: TTS сейчас говорит → голосовой ввод игнорируется (защита от эха)
         self._is_speaking = False
 
-        print("⚙️ Инициализация систем...")
+        logger.heavy_line()
+        print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
+        logger.heavy_line()
         try:
             self.tts = TTSEngine()  # speaker='xenia' по умолчанию
             self.recognizer = SpeechRecognizer()
@@ -45,9 +48,11 @@ class VoiceAssistant:
         Используйте этот метод вместо self.tts.speak() везде, где
         нужна защита (в навыках: assistant.speak(...)).
         """
+        logger.step("🔊", "TTS", f"«{text}»")
         self._is_speaking = True
         try:
-            self.tts.speak(text)
+            with logger.Timer("синтез + воспроизведение"):
+                self.tts.speak(text)
         finally:
             self._is_speaking = False
 
@@ -74,9 +79,10 @@ class VoiceAssistant:
                 if not self.is_running:
                     break
                 if user_input.strip():
-                    print(f"👤 Вы (консоль): {user_input}")
+                    print(f"\n👤 {logger.C.BOLD}Ввод (консоль):{logger.C.RESET} {user_input}")
                     text = user_input.lower()
                     if self.name in text:
+                        logger.step("✂️ ", "Wake-word удалён", f"«{self.name}»")
                         text = text.replace(self.name, "").strip()
                     self._process(text)
             except EOFError:
@@ -89,8 +95,16 @@ class VoiceAssistant:
         self.is_running = True
         greeting_text = "Системы активированы. Я готов к работе."
 
+        logger.banner("Голосовой ассистент")
+        logger.ok("Все подсистемы инициализированы")
+        logger.kv("имя", f"«{self.name}»")
+        logger.kv("модель TTS", "Silero v4_ru (xenia)")
+        logger.kv("модель STT", "Vosk small-ru-0.22")
+        logger.kv("модель NLU", "spaCy + кастомный textcat (5 классов)")
+        print()
+
         # Воспроизводим звук успешного запуска
-        print("🎵 Воспроизведение звука запуска...")
+        logger.step("🎵", "Звук запуска")
         self._play_sound(self.startup_sound_path)
 
         self.speak(greeting_text)
@@ -108,10 +122,13 @@ class VoiceAssistant:
                     # Пропускаем, если TTS сейчас говорит (защита от эха)
                     if self._is_speaking:
                         continue
-                    print(f"👤 Вы: {text}")
+                    print(f"\n👤 {logger.C.BOLD}Ввод (голос):{logger.C.RESET} {text}")
                     if self.name in text:
+                        logger.step("✂️ ", "Wake-word обнаружен и удалён", f"«{self.name}»")
                         clean_text = text.replace(self.name, "").strip()
                         self._process(clean_text)
+                    else:
+                        logger.detail("в реплике нет имени ассистента — игнорирую")
 
         except KeyboardInterrupt:
             self.stop()
@@ -151,7 +168,6 @@ class VoiceAssistant:
     @staticmethod
     def _volume_up():
         """Увеличивает системную громкость."""
-        print("🔊 [SYSTEM] Громкость +")
         if os.name == 'posix':
             os.system("amixer sset 'Master' 10%+")
         else:
@@ -163,7 +179,6 @@ class VoiceAssistant:
     @staticmethod
     def _volume_down():
         """Уменьшает системную громкость."""
-        print("🔉 [SYSTEM] Громкость -")
         if os.name == 'posix':
             os.system("amixer sset 'Master' 10%-")
         else:
@@ -179,7 +194,6 @@ class VoiceAssistant:
         Linux: использует amixer.
         """
         level = max(0, min(100, level))
-        print(f"🔊 [SYSTEM] Установка громкости: {level}%")
         if os.name == 'posix':
             os.system(f"amixer sset 'Master' {level}%")
         else:
@@ -245,57 +259,86 @@ class VoiceAssistant:
 
         t = text.lower().strip()
 
+        logger.section(f"ВХОД  «{text}»", emoji="🎤")
+
         # ── 1. Команды, которые НЕ прерывают воспроизведение ──────────
 
-        # Стоп — остановить текущее воспроизведение
         if t in ("стоп", "стой", "стопп", "стоп стоп", "остановись",
                  "остановить", "замолчи", "хватит", "отстань",
                  "выключи радио", "выключи сказку", "stop"):
-            print("⏹️  [SYSTEM] Стоп.")
+            logger.step("⏹️ ", "Системная команда", "СТОП (прерывает воспроизведение)")
             self.streamer.stop()
             self.speak("Остановлено.")
+            logger.end_section()
             return
 
-        # Громкость выше
         if t in ("громче", "сделай громче", "прибавь громкость",
                  "прибавь", "погромче"):
+            logger.step("🔊", "Системная команда", "ГРОМЧЕ (NLU обойдён)")
             self._volume_up()
             self.speak("Громче.")
+            logger.end_section()
             return
 
-        # Громкость ниже
         if t in ("тише", "сделай тише", "убавь громкость",
                  "убавь", "потише"):
+            logger.step("🔉", "Системная команда", "ТИШЕ (NLU обойдён)")
             self._volume_down()
             self.speak("Тише.")
+            logger.end_section()
             return
 
-        # Установить конкретный уровень громкости: «громкость 50»
         if t.startswith("громкость"):
             level = self._parse_volume_level(t)
             if level is not None:
+                logger.step("🔊", "Системная команда", f"ГРОМКОСТЬ {level}%")
                 self._set_volume(level)
                 self.speak(f"Громкость {level} процентов.")
             else:
+                logger.warn("Не удалось распознать уровень громкости")
                 self.speak("Не понял уровень громкости. Скажите, например: громкость пятьдесят.")
+            logger.end_section()
             return
 
-        # ── 2. Все остальные команды прерывают текущее воспроизведение ─
+        # ── 2. Прерывание текущего воспроизведения (barge-in) ─────────
+        logger.step("✂️ ", "Barge-in: остановка текущего воспроизведения")
         self.streamer.stop()
 
-        # ── 3. Системные команды ───────────────────────────────────────
+        # ── 3. Системные команды управления питанием ──────────────────
         if any(w in t for w in ("перезагрузи", "перезагрузка", "ребут", "reboot")):
-            print("🔄 [SYSTEM] Перезагрузка системы...")
+            logger.step("🔄", "Системная команда", "ПЕРЕЗАГРУЗКА")
             self.speak("Перезагружаю систему. Скоро вернусь.")
             os.system("sudo reboot" if os.name == 'posix' else "shutdown /r /t 0")
             return
 
         if any(w in t for w in ("выключи", "выключить", "отключи питание", "power off")):
-            print("🔴 [SYSTEM] Выключение системы...")
+            logger.step("🔴", "Системная команда", "ВЫКЛЮЧЕНИЕ")
             self.speak("Выключаю питание. До свидания.")
             os.system("sudo shutdown -h now" if os.name == 'posix' else "shutdown /s /t 0")
             return
 
-        # ── 4. NLP — маршрутизация через spaCy ────────────────────────
-        parsed_data = self.parser.parse(text)
+        # ── 4. NLU — классификация интента через spaCy ────────────────
+        logger.step("🧠", "NLU", "запускаю IntentParser (spaCy textcat)")
+        with logger.Timer("анализ текста"):
+            parsed_data = self.parser.parse(text)
+
+        # Визуализируем результаты классификатора
+        doc = parsed_data.get("spacy_doc")
+        if doc is not None and hasattr(doc, "cats") and doc.cats:
+            logger.detail("вероятности по классам:")
+            logger.intent_bars(doc.cats, predicted=parsed_data["intent"])
+
+        # Сущности
+        entities = parsed_data.get("entities", {})
+        if entities:
+            logger.step("🏷️ ", "Сущности", str(entities))
+        else:
+            logger.step("🏷️ ", "Сущности", "(не извлечены)")
+
+        # ── 5. Маршрутизация в нужный навык ───────────────────────────
+        logger.step("🔀", "Маршрутизация", f"интент → {parsed_data['intent']}")
+        logger.thin_line()
+
         self.router.route_command(parsed_data, self)
+
+        logger.end_section()

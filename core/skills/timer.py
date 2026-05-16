@@ -11,8 +11,13 @@
 вызывает assistant.speak() с уведомлением.
 """
 
+import os
+import sys
 import re
 import threading
+
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import logger
 
 # ------------------------------------------------------------------
 # Глобальное состояние: список активных таймеров
@@ -169,8 +174,7 @@ def _start_timer(seconds: int, assistant):
         with _lock:
             if timer in _active_timers:
                 _active_timers.remove(timer)
-        print(f"⏰ [ТАЙМЕР] Сработал! ({seconds} сек)")
-        # Останавливаем текущий аудиопоток (радио/сказку), чтобы уведомление было слышно
+        logger.system("ТАЙМЕР", f"⏰ сработал! ({seconds} сек)")
         try:
             assistant.streamer.stop()
         except Exception:
@@ -185,8 +189,9 @@ def _start_timer(seconds: int, assistant):
         _active_timers.append(timer)
 
     duration_spoken = _format_duration_spoken(seconds)
-    print(f"⏱️  [ТАЙМЕР] Поставлен на {seconds} сек ({duration_spoken}). "
-          f"Активных: {len(_active_timers)}")
+    logger.step("⏱️ ", "Навык", "timer.py")
+    logger.detail(f"длительность: {seconds} сек ({duration_spoken})")
+    logger.detail(f"всего активных таймеров: {len(_active_timers)}")
     assistant.speak(f"Поставила таймер на {duration_spoken}.")
 
 
@@ -204,7 +209,7 @@ def _cancel_all_timers(assistant):
 
     count = len(active)
     word = _form_timer(count)
-    print(f"🚫 [ТАЙМЕР] Отменено {count} таймер(а/ов).")
+    logger.step("🚫", "Навык", f"timer.py — отмена {count} таймер(а/ов)")
     if count == 1:
         assistant.speak("Таймер отменён.")
     else:
