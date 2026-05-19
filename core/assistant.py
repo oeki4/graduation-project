@@ -24,6 +24,15 @@ class VoiceAssistant:
         # Флаг: TTS сейчас говорит → голосовой ввод игнорируется (защита от эха)
         self._is_speaking = False
 
+        # Состояние ducking: когда обнаружено имя в partial-распознавании,
+        # громкость опускается до 25%, чтобы радио/сказка не заглушали
+        # голосовую команду. После обработки восстанавливается прежний уровень.
+        self._ducked = False
+        self._pre_duck_volume = None
+        self._unduck_watchdog: threading.Timer | None = None
+        self._duck_target_pct = 25
+        self._duck_watchdog_sec = 15.0
+
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
@@ -114,7 +123,10 @@ class VoiceAssistant:
                     if self.name in text:
                         logger.step("✂️ ", "Wake-word удалён", f"«{self.name}»")
                         text = text.replace(self.name, "").strip()
-                    self._process(text)
+                    try:
+                        self._process(text)
+                    finally:
+                        self._unduck_audio()
             except EOFError:
                 break
             except Exception as e:
@@ -143,22 +155,39 @@ class VoiceAssistant:
         threading.Thread(target=self._console_listener, daemon=True).start()
 
         try:
-            for result in self.recognizer.listen(yield_partial=False):
+            # Включаем partial-результаты, чтобы реагировать на имя ассистента
+            # ДО окончания реплики (через ducking приглушаем фон).
+            for result in self.recognizer.listen(yield_partial=True):
                 if not self.is_running:
                     break
 
-                if result["type"] == "final":
-                    text = result["text"].lower()
-                    # Пропускаем, если TTS сейчас говорит (защита от эха)
-                    if self._is_speaking:
-                        continue
-                    print(f"\n👤 {logger.C.BOLD}Ввод (голос):{logger.C.RESET} {text}")
+                text = result["text"].lower()
+
+                # Partial: предварительное распознавание ещё до финальной паузы.
+                # Если в нём появилось имя ассистента — немедленно приглушаем
+                # фоновое воспроизведение, чтобы лучше расслышать команду.
+                if result["type"] == "partial":
+                    if text and self.name in text and not self._is_speaking:
+                        self._duck_audio()
+                    continue
+
+                # Final: команда распознана целиком, можно обрабатывать.
+                if self._is_speaking:
+                    # TTS говорит — игнорируем эхо
+                    self._unduck_audio()
+                    continue
+
+                print(f"\n👤 {logger.C.BOLD}Ввод (голос):{logger.C.RESET} {text}")
+                try:
                     if self.name in text:
                         logger.step("✂️ ", "Wake-word обнаружен и удалён", f"«{self.name}»")
                         clean_text = text.replace(self.name, "").strip()
                         self._process(clean_text)
                     else:
                         logger.detail("в реплике нет имени ассистента — игнорирую")
+                finally:
+                    # Возвращаем громкость в любом случае
+                    self._unduck_audio()
 
         except KeyboardInterrupt:
             self.stop()
@@ -190,6 +219,82 @@ class VoiceAssistant:
         finally:
             # Принудительно убиваем все процессы и потоки
             os._exit(0)
+
+    # ------------------------------------------------------------------
+    # Auto-ducking: приглушение фонового воспроизведения на время команды
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_current_volume() -> int | None:
+        """Возвращает текущую системную громкость 0–100, или None при ошибке."""
+        if os.name == 'posix':
+            try:
+                import subprocess
+                out = subprocess.run(
+                    ["amixer", "get", "Master"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                m = re.search(r"\[(\d+)%\]", out.stdout)
+                return int(m.group(1)) if m else None
+            except Exception:
+                return None
+        else:
+            try:
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                from comtypes import CLSCTX_ALL
+                from ctypes import cast, POINTER
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                return int(round(volume.GetMasterVolumeLevelScalar() * 100))
+            except Exception:
+                return None
+
+    def _duck_audio(self):
+        """
+        Опускает громкость для облегчения распознавания речи поверх
+        играющего радио/сказки. Текущий уровень сохраняется и потом
+        восстанавливается через _unduck_audio().
+        """
+        if self._ducked:
+            return
+
+        current = self._get_current_volume()
+        if current is not None and current <= self._duck_target_pct:
+            # Уже тихо — никаких действий не требуется
+            return
+
+        self._pre_duck_volume = current
+        self._set_volume(self._duck_target_pct)
+        self._ducked = True
+        logger.system("AUDIO", f"📉 ducking {current}% → {self._duck_target_pct}% "
+                                f"(услышал имя ассистента)")
+
+        # Сторожевой таймер: если по какой-то причине _unduck_audio()
+        # не будет вызван (нет финального распознавания, исключение и т. п.),
+        # автоматически восстанавливаем громкость через _duck_watchdog_sec.
+        if self._unduck_watchdog is not None:
+            self._unduck_watchdog.cancel()
+        self._unduck_watchdog = threading.Timer(
+            self._duck_watchdog_sec, self._unduck_audio
+        )
+        self._unduck_watchdog.daemon = True
+        self._unduck_watchdog.start()
+
+    def _unduck_audio(self):
+        """Возвращает громкость на уровень, бывший до ducking."""
+        if not self._ducked:
+            return
+
+        if self._pre_duck_volume is not None:
+            self._set_volume(self._pre_duck_volume)
+            logger.system("AUDIO", f"📈 unducking → {self._pre_duck_volume}%")
+
+        self._ducked = False
+        self._pre_duck_volume = None
+        if self._unduck_watchdog is not None:
+            self._unduck_watchdog.cancel()
+            self._unduck_watchdog = None
 
     # ------------------------------------------------------------------
     # Управление системной громкостью
