@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import numpy as np
 import sounddevice as sd
 import ssl
 
@@ -54,26 +55,36 @@ class TTSEngine:
     def speak(self, text):
         """
         Синтезирует текст в речь и сразу воспроизводит.
+
+        Реализация специально использует int16 PCM и явный sd.OutputStream,
+        а не sd.play() с float32. Причина: ALSA-plug + dmix на Raspberry Pi
+        с I²S-усилителем (MAX98357A, voiceHAT и т. п.) при float32 выдаёт
+        хрипы и сильно занижает громкость. С int16 поток идёт чисто.
         """
         if not text:
             return
 
         try:
-            # Генерация аудио-тензора
+            # Silero выдаёт float32 в диапазоне [-1.0, 1.0]
             audio_tensor = self.model.apply_tts(
                 text=text,
                 speaker=self.speaker,
                 sample_rate=self.sample_rate,
                 put_accent=True,
-                put_yo=True
+                put_yo=True,
             )
+            audio_f32 = audio_tensor.numpy()
 
-            # Конвертируем тензор PyTorch в обычный массив numpy
-            audio_np = audio_tensor.numpy()
+            # Конвертируем float32 → int16 с защитой от клиппинга
+            audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
 
-            # Воспроизводим звук
-            sd.play(audio_np, self.sample_rate)
-            sd.wait()  # Блокируем выполнение кода, пока фраза не будет досказана до конца
+            # Явный OutputStream с указанными channels/dtype — стабильнее на I²S
+            with sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype="int16",
+            ) as out:
+                out.write(audio_i16)
 
         except Exception as e:
             print(f"❌ Ошибка при синтезе речи: {e}")

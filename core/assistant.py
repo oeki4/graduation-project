@@ -96,16 +96,30 @@ class VoiceAssistant:
             self._is_speaking = False
 
     def _play_sound(self, file_path):
-        """Внутренний метод для воспроизведения аудиофайлов."""
+        """
+        Внутренний метод для воспроизведения аудиофайлов.
+
+        Читаем как int16 PCM и пишем через явный OutputStream — это даёт
+        стабильное воспроизведение на Raspberry Pi с I²S-выходом
+        (без хрипов и заниженной громкости, характерных для float32).
+        """
         if not os.path.exists(file_path):
             print(f"⚠️ Звуковой файл {file_path} не найден. Пропускаю.")
             return
 
         try:
-            # Читаем аудиофайл и воспроизводим его
-            data, fs = sf.read(file_path)
-            sd.play(data, fs)
-            sd.wait() # Ждем, пока звук полностью не проиграется
+            # dtype='int16' принципиально — sf.read() по умолчанию
+            # возвращает float64, что плохо ложится на ALSA-plug+dmix
+            data, fs = sf.read(file_path, dtype="int16")
+
+            # Гарантируем 2D-форму (frames × channels) для OutputStream
+            if data.ndim == 1:
+                channels = 1
+            else:
+                channels = data.shape[1]
+
+            with sd.OutputStream(samplerate=fs, channels=channels, dtype="int16") as out:
+                out.write(data)
         except Exception as e:
             print(f"❌ Ошибка воспроизведения звука: {e}")
 
