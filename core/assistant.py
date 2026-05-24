@@ -45,6 +45,14 @@ class VoiceAssistant:
         if os.name == "nt":
             self._init_windows_volume()
 
+        # Linux: автоматически находим имя главного микшера. На разных
+        # звуковых платах оно отличается — Master, PCM, Digital, Speaker.
+        # Если не определилось — берём Master как умолчание.
+        self._alsa_mixer = None
+        if os.name == "posix":
+            self._alsa_mixer = self._detect_alsa_mixer() or "Master"
+            logger.system("AUDIO", f"микшер ALSA: {self._alsa_mixer}")
+
         # Диагностика аудиоустройств — полезно при первой настройке на Pi
         if os.environ.get("AUDIO_DEBUG"):
             try:
@@ -119,15 +127,9 @@ class VoiceAssistant:
             # dtype='int16' принципиально — sf.read() по умолчанию
             # возвращает float64, что плохо ложится на ALSA-plug+dmix
             data, fs = sf.read(file_path, dtype="int16")
-
-            # Гарантируем 2D-форму (frames × channels) для OutputStream
-            if data.ndim == 1:
-                channels = 1
-            else:
-                channels = data.shape[1]
-
-            with sd.OutputStream(samplerate=fs, channels=channels, dtype="int16") as out:
-                out.write(data)
+            # sd.play(blocking=True) сам управляет буфером — на I²S это
+            # надёжнее, чем OutputStream.write() (нет underrun'ов).
+            sd.play(data, fs, blocking=True)
         except Exception as e:
             print(f"❌ Ошибка воспроизведения звука: {e}")
 
@@ -281,7 +283,7 @@ class VoiceAssistant:
             try:
                 import subprocess
                 out = subprocess.run(
-                    ["amixer", "get", "Master"],
+                    ["amixer", "get", self._alsa_mixer],
                     capture_output=True, text=True, timeout=2,
                 )
                 m = re.search(r"\[(\d+)%\]", out.stdout)
@@ -347,21 +349,53 @@ class VoiceAssistant:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _volume_up():
-        """Увеличивает системную громкость."""
-        if os.name == 'posix':
-            os.system("amixer sset 'Master' 10%+")
+    def _detect_alsa_mixer() -> str | None:
+        """
+        Находит главный (master) микшер. На разных звуковых платах он
+        называется по-разному: на встроенной — Master, на USB-DAC — PCM,
+        на I²S-HAT часто Digital или Speaker.
+        """
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["amixer", "scontrols"],
+                capture_output=True, text=True, timeout=2,
+            )
+            controls = out.stdout
+            for candidate in ("Master", "PCM", "Digital", "Speaker", "Playback"):
+                if f"'{candidate}'" in controls:
+                    return candidate
+        except Exception:
+            pass
+        return None
+
+    def _amixer_run(self, *args):
+        """Запуск amixer с подавлением stdout/stderr (иначе шумит в лог)."""
+        try:
+            import subprocess
+            subprocess.run(
+                ["amixer", "sset", self._alsa_mixer, *args],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+        except Exception as e:
+            logger.warn(f"amixer ошибка: {e}")
+
+    def _volume_up(self):
+        """Увеличивает системную громкость на ~10%."""
+        if os.name == "posix":
+            self._amixer_run("10%+")
         else:
-            # Симуляция нажатия медиаклавиши Volume Up (0xAF) через Windows API
             import ctypes
             ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)
 
-    @staticmethod
-    def _volume_down():
-        """Уменьшает системную громкость."""
-        if os.name == 'posix':
-            os.system("amixer sset 'Master' 10%-")
+    def _volume_down(self):
+        """Уменьшает системную громкость на ~10%."""
+        if os.name == "posix":
+            self._amixer_run("10%-")
         else:
             import ctypes
             ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)
@@ -370,12 +404,12 @@ class VoiceAssistant:
     def _set_volume(self, level: int):
         """
         Устанавливает системную громкость в процентах (0–100).
-        Windows: использует закэшированный COM-интерфейс pycaw.
-        Linux: использует amixer.
+        Windows: закэшированный COM-интерфейс pycaw.
+        Linux: amixer на автодетектированном микшере.
         """
         level = max(0, min(100, level))
         if os.name == "posix":
-            os.system(f"amixer sset 'Master' {level}%")
+            self._amixer_run(f"{level}%")
         else:
             if self._win_volume_iface is None:
                 return

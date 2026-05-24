@@ -78,13 +78,10 @@ class TTSEngine:
             # Конвертируем float32 → int16 с защитой от клиппинга
             audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
 
-            # Явный OutputStream с указанными channels/dtype — стабильнее на I²S
-            with sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-            ) as out:
-                out.write(audio_i16)
+            # sd.play() со встроенным callback'ом и блокирующим ожиданием
+            # держит буфер сам и не даёт underrun на медленных I²S DAC.
+            # blocking=True заменяет связку sd.play()+sd.wait().
+            sd.play(audio_i16, self.sample_rate, blocking=True)
 
         except Exception as e:
             print(f"❌ Ошибка при синтезе речи: {e}")
