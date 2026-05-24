@@ -3,6 +3,8 @@ import sys
 import wave
 import tempfile
 import subprocess
+import hashlib
+from pathlib import Path
 import torch
 import numpy as np
 import sounddevice as sd
@@ -41,6 +43,12 @@ class TTSEngine:
         self.speaker = speaker
         self.sample_rate = sample_rate
 
+        # Кэш синтезированных фраз (повторяющиеся реплики ассистента
+        # типа «Готово», «Не поняла команду», «Поставила таймер» —
+        # синтезируются один раз, потом мгновенно играются из WAV).
+        self.cache_dir = Path(__file__).parent / "assets" / "tts_cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         try:
             # Загрузка модели из torch hub (при первом запуске скачается кэш)
             self.model, _ = torch.hub.load(
@@ -60,33 +68,47 @@ class TTSEngine:
         Синтезирует текст в речь и сразу воспроизводит.
 
         Параметр volume (0.0–1.0) — программное масштабирование PCM
-        перед воспроизведением. Используется на Linux/Pi, где
-        I²S-DAC не имеет аппаратной регулировки громкости.
-        На Windows volume игнорируется (там используется системная
-        громкость через pycaw).
+        перед воспроизведением. На Linux/Pi применяется в коде,
+        на Windows игнорируется (там pycaw регулирует системно).
+
+        Использует файловый кэш: повторяющиеся реплики синтезируются
+        один раз, а потом воспроизводятся напрямую из WAV — на Pi
+        это даёт ускорение в десятки раз.
         """
         if not text:
             return
 
         try:
-            # Silero выдаёт float32 в диапазоне [-1.0, 1.0]
-            audio_tensor = self.model.apply_tts(
-                text=text,
-                speaker=self.speaker,
-                sample_rate=self.sample_rate,
-                put_accent=True,
-                put_yo=True,
-            )
-            audio_f32 = audio_tensor.numpy()
+            cache_file = self._cache_path(text)
 
-            # Конвертируем float32 → int16 с защитой от клиппинга.
-            # Применяем volume сразу здесь, пока ещё в float — точнее.
-            scaled_f32 = audio_f32 * (32767.0 * max(0.0, min(1.0, volume)))
-            audio_i16 = scaled_f32.clip(-32768, 32767).astype(np.int16)
+            if cache_file.exists():
+                # Cache HIT — читаем готовый WAV, не зовём Silero
+                logger.system("TTS", f"кэш: {cache_file.name[:8]}…")
+                audio_i16 = self._read_wav_int16(cache_file)
+            else:
+                # Cache MISS — синтезируем и сохраняем для будущих вызовов
+                logger.system("TTS", "синтез (нет в кэше)")
+                audio_tensor = self.model.apply_tts(
+                    text=text,
+                    speaker=self.speaker,
+                    sample_rate=self.sample_rate,
+                    put_accent=True,
+                    put_yo=True,
+                )
+                audio_f32 = audio_tensor.numpy()
+                audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
+                # Сохраняем «сырой» PCM (без громкости) — громкость
+                # применяется при каждом воспроизведении отдельно.
+                self._write_wav_int16(cache_file, audio_i16)
 
-            # На Linux (Raspberry Pi) воспроизводим через subprocess + aplay:
-            # sounddevice на медленных I²S DAC даёт стену underrun-ов.
-            # aplay — родная утилита ALSA, сама управляет буферами, проверена.
+            # Применяем программную громкость
+            vol = max(0.0, min(1.0, volume))
+            if vol < 0.999:
+                audio_i16 = (audio_i16.astype(np.float32) * vol).clip(
+                    -32768, 32767
+                ).astype(np.int16)
+
+            # Воспроизводим
             if os.name == "posix":
                 _play_pcm_via_aplay(audio_i16, self.sample_rate, channels=1)
             else:
@@ -94,6 +116,30 @@ class TTSEngine:
 
         except Exception as e:
             print(f"❌ Ошибка при синтезе речи: {e}")
+
+    # ------------------------------------------------------------------
+    # Файловый кэш синтезированных фраз
+    # ------------------------------------------------------------------
+
+    def _cache_path(self, text: str) -> Path:
+        """Путь к закэшированному WAV для данной фразы."""
+        # Включаем speaker и sample_rate в ключ — если поменяются,
+        # старые кэши перестанут использоваться (и со временем удалятся вручную).
+        key_src = f"{text}|{self.speaker}|{self.sample_rate}"
+        key = hashlib.md5(key_src.encode("utf-8")).hexdigest()
+        return self.cache_dir / f"{key}.wav"
+
+    def _read_wav_int16(self, path: Path) -> np.ndarray:
+        with wave.open(str(path), "rb") as wf:
+            frames = wf.readframes(wf.getnframes())
+        return np.frombuffer(frames, dtype=np.int16)
+
+    def _write_wav_int16(self, path: Path, audio_i16: np.ndarray):
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # int16 = 2 байта
+            wf.setframerate(self.sample_rate)
+            wf.writeframes(audio_i16.tobytes())
 
 
 def _play_pcm_via_aplay(audio_i16: np.ndarray, sample_rate: int, channels: int = 1):

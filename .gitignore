@@ -9,3 +9,6 @@
 # Python
 __pycache__/
 *.pyc
+
+# TTS-кэш (генерируется автоматически в runtime)
+/core/assets/tts_cache/
