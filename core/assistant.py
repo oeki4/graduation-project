@@ -37,6 +37,14 @@ class VoiceAssistant:
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
 
+        # Windows: один раз создаём COM-интерфейс для управления громкостью.
+        # Если делать это на каждый _get/_set_volume, pycaw порождает кучу
+        # COM-объектов, которые потом «грязно» отрелизиваются при GC и
+        # засоряют stderr трейсбеками от _compointer_base.__del__.
+        self._win_volume_iface = None
+        if os.name == "nt":
+            self._init_windows_volume()
+
         # Диагностика аудиоустройств — полезно при первой настройке на Pi
         if os.environ.get("AUDIO_DEBUG"):
             try:
@@ -218,6 +226,14 @@ class VoiceAssistant:
         self.is_running = False
         print("\n🔴 Отключение систем. До свидания!")
 
+        # Освобождаем COM-объект до сборщика мусора, иначе на Windows
+        # будут шумные «ValueError: COM method call without VTable»
+        if self._win_volume_iface is not None:
+            try:
+                self._win_volume_iface = None
+            except Exception:
+                pass
+
         # Останавливаем воспроизведение аудио если что-то играло
         try:
             self.streamer.stop()
@@ -238,10 +254,30 @@ class VoiceAssistant:
     # Auto-ducking: приглушение фонового воспроизведения на время команды
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_current_volume() -> int | None:
+    def _init_windows_volume(self):
+        """Создаёт COM-интерфейс громкости один раз при старте (Windows)."""
+        try:
+            import comtypes
+            try:
+                comtypes.CoInitialize()
+            except Exception:
+                pass  # уже инициализирован в этом потоке
+
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            from comtypes import CLSCTX_ALL
+            from ctypes import cast, POINTER
+
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            self._win_volume_iface = cast(interface, POINTER(IAudioEndpointVolume))
+            logger.system("AUDIO", "COM-интерфейс громкости (pycaw) инициализирован")
+        except Exception as e:
+            logger.warn(f"pycaw недоступен — управление громкостью отключено: {e}")
+            self._win_volume_iface = None
+
+    def _get_current_volume(self) -> int | None:
         """Возвращает текущую системную громкость 0–100, или None при ошибке."""
-        if os.name == 'posix':
+        if os.name == "posix":
             try:
                 import subprocess
                 out = subprocess.run(
@@ -253,14 +289,10 @@ class VoiceAssistant:
             except Exception:
                 return None
         else:
+            if self._win_volume_iface is None:
+                return None
             try:
-                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-                from comtypes import CLSCTX_ALL
-                from ctypes import cast, POINTER
-                devices = AudioUtilities.GetSpeakers()
-                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                volume = cast(interface, POINTER(IAudioEndpointVolume))
-                return int(round(volume.GetMasterVolumeLevelScalar() * 100))
+                return int(round(self._win_volume_iface.GetMasterVolumeLevelScalar() * 100))
             except Exception:
                 return None
 
@@ -335,27 +367,22 @@ class VoiceAssistant:
             ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)
 
-    @staticmethod
-    def _set_volume(level: int):
+    def _set_volume(self, level: int):
         """
         Устанавливает системную громкость в процентах (0–100).
-        Windows: использует pycaw (Core Audio API).
+        Windows: использует закэшированный COM-интерфейс pycaw.
         Linux: использует amixer.
         """
         level = max(0, min(100, level))
-        if os.name == 'posix':
+        if os.name == "posix":
             os.system(f"amixer sset 'Master' {level}%")
         else:
+            if self._win_volume_iface is None:
+                return
             try:
-                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-                from comtypes import CLSCTX_ALL
-                from ctypes import cast, POINTER
-                devices = AudioUtilities.GetSpeakers()
-                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                volume = cast(interface, POINTER(IAudioEndpointVolume))
-                volume.SetMasterVolumeLevelScalar(level / 100.0, None)
-            except ImportError:
-                print("⚠️ [SYSTEM] pycaw не установлен: pip install pycaw")
+                self._win_volume_iface.SetMasterVolumeLevelScalar(level / 100.0, None)
+            except Exception as e:
+                logger.warn(f"Не удалось установить громкость: {e}")
 
     # Таблица перевода русских числительных в цифры (0–100)
     _RU_NUMBERS = {
