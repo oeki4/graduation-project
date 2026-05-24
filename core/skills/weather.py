@@ -185,82 +185,145 @@ def _degrees_form(n: int) -> str:
     return "градусов"
 
 
+# ------------------------------------------------------------------
+# Open-Meteo API — бесплатный, без ключа, работает из России
+# ------------------------------------------------------------------
+
+# Геокодинг: имя города → координаты
+_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+# Прогноз: координаты → погода
+_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# WMO weather codes → русские описания
+# https://open-meteo.com/en/docs (раздел Weather codes)
+_WMO_CODES = {
+    0:  "ясно",
+    1:  "преимущественно ясно",
+    2:  "переменная облачность",
+    3:  "пасмурно",
+    45: "туман",
+    48: "изморозь",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    56: "слабая ледяная морось",
+    57: "ледяная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    66: "слабый ледяной дождь",
+    67: "ледяной дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    77: "снежные зёрна",
+    80: "слабый ливень",
+    81: "ливень",
+    82: "сильный ливень",
+    85: "слабый снегопад",
+    86: "сильный снегопад",
+    95: "гроза",
+    96: "гроза с градом",
+    99: "сильная гроза с градом",
+}
+
+
 def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
     """
     Возвращает описание погоды для города на русском, удобное для TTS.
-    Использует JSON API wttr.in (format=j1):
-      - current_condition  — текущая погода
-      - weather[0..2]      — прогноз на сегодня/завтра/послезавтра
-                              с почасовой разбивкой (8 точек по 3 часа)
+    Использует Open-Meteo: бесплатный API без ключа, доступен из России.
+
+    1. Геокодинг: имя города → координаты (lat, lon)
+    2. Прогноз: GET /v1/forecast?latitude=...&longitude=...&...
+    3. Из ответа достаём температуру и WMO weather code → описание
 
     Возвращает строку вида «плюс 11 градусов, облачно».
     """
     day_offset, hour = _TIME_MAP.get(time_key, (0, None))
 
-    # wttr.in не отдаёт исторических данных — на «вчера» отвечаем явно
+    # Open-Meteo бесплатно отдаёт прогноз на 7 дней вперёд, но не прошлое
     if day_offset < 0:
-        print("⚠️  [ПОГОДА] wttr.in не предоставляет данные за прошлое.")
+        print("⚠️  [ПОГОДА] Open-Meteo не предоставляет данные за прошлое.")
         return "к сожалению, данные о погоде в прошлом недоступны"
 
+    # ── 1. Геокодинг ──────────────────────────────────────────────
     try:
-        response = requests.get(
-            f"https://wttr.in/{city}",
-            params={"format": "j1", "lang": "ru"},
+        geo_resp = requests.get(
+            _GEOCODE_URL,
+            params={"name": city, "count": 1, "language": "ru", "format": "json"},
             timeout=6,
             headers={"User-Agent": "VoiceAssistant/1.0"},
         )
-        response.raise_for_status()
-        data = response.json()
-
-        # Выбираем источник: текущая погода или почасовой прогноз
-        if day_offset == 0 and hour is None:
-            condition = data.get("current_condition", [{}])[0]
-        else:
-            forecast_days = data.get("weather", [])
-            if day_offset >= len(forecast_days):
-                return None
-            day_data = forecast_days[day_offset]
-            hourly = day_data.get("hourly", [])
-            if not hourly:
-                return None
-            # Почасовка идёт шагом 3 часа: hourly[0]=00:00, [4]=12:00, [6]=18:00
-            target_hour = 12 if hour is None else hour
-            idx = max(0, min(len(hourly) - 1, target_hour // 3))
-            condition = hourly[idx]
-
-        # Температура: в current_condition поле «temp_C», в hourly — «tempC»
-        temp_str = condition.get("temp_C") or condition.get("tempC")
-        if not temp_str:
+        geo_resp.raise_for_status()
+        geo_data = geo_resp.json()
+        results = geo_data.get("results")
+        if not results:
+            print(f"⚠️  [ПОГОДА] Город «{city}» не найден.")
             return None
-        temp = int(temp_str)
-
-        # Описание на русском (lang_ru заполняется при ?lang=ru)
-        desc = ""
-        if condition.get("lang_ru"):
-            desc = condition["lang_ru"][0].get("value", "")
-        if not desc:
-            # Фоллбэк на английский, если перевода вдруг нет
-            desc = condition.get("weatherDesc", [{}])[0].get("value", "")
-
-        # Преобразуем в форму, удобную для TTS (число прописью + правильное окончание):
-        # «+11°C, Облачно» → «плюс одиннадцать градусов, облачно»
-        # «+1°C» → «плюс один градус»
-        # «-22°C» → «минус двадцать два градуса»
-        temp_words = _number_to_words(temp)
-        degrees = _degrees_form(temp)
-
-        if temp > 0:
-            temp_spoken = f"плюс {temp_words} {degrees}"
-        elif temp < 0:
-            temp_spoken = f"минус {temp_words} {degrees}"
-        else:
-            temp_spoken = "ноль градусов"
-
-        return f"{temp_spoken}, {desc.lower()}"
-
-    except requests.RequestException as e:
-        print(f"❌ [ПОГОДА] Ошибка запроса к wttr.in: {e}")
+        lat = results[0]["latitude"]
+        lon = results[0]["longitude"]
+        timezone = results[0].get("timezone", "auto")
+    except (requests.RequestException, ValueError, KeyError) as e:
+        print(f"❌ [ПОГОДА] Ошибка геокодинга: {e}")
         return None
-    except (ValueError, KeyError, IndexError) as e:
+
+    # ── 2. Прогноз ────────────────────────────────────────────────
+    try:
+        params = {
+            "latitude":  lat,
+            "longitude": lon,
+            "timezone":  timezone,
+            "current":   "temperature_2m,weather_code",
+            "hourly":    "temperature_2m,weather_code",
+            "forecast_days": 3,
+        }
+        fc_resp = requests.get(
+            _FORECAST_URL, params=params, timeout=6,
+            headers={"User-Agent": "VoiceAssistant/1.0"},
+        )
+        fc_resp.raise_for_status()
+        fc_data = fc_resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"❌ [ПОГОДА] Ошибка прогноза: {e}")
+        return None
+
+    # ── 3. Выбираем точку прогноза согласно time_key ──────────────
+    try:
+        if day_offset == 0 and hour is None:
+            # Текущая погода
+            cur = fc_data["current"]
+            temp = cur["temperature_2m"]
+            code = cur["weather_code"]
+        else:
+            # Почасовой прогноз: hourly[0] = час 0 первого дня,
+            # hourly[24] = час 0 второго дня, и т. д.
+            target_hour = 12 if hour is None else hour
+            idx = day_offset * 24 + target_hour
+            hourly = fc_data["hourly"]
+            if idx >= len(hourly["time"]):
+                return None
+            temp = hourly["temperature_2m"][idx]
+            code = hourly["weather_code"][idx]
+
+        temp = int(round(temp))
+        desc = _WMO_CODES.get(int(code), "неизвестная погода")
+
+    except (KeyError, IndexError, TypeError) as e:
         print(f"❌ [ПОГОДА] Не удалось разобрать ответ: {e}")
         return None
+
+    # ── 4. Преобразуем в форму, удобную для TTS ──────────────────
+    # «+11, code=3» → «плюс одиннадцать градусов, пасмурно»
+    # «+1, code=0»  → «плюс один градус, ясно»
+    # «-22, code=73» → «минус двадцать два градуса, снег»
+    temp_words = _number_to_words(temp)
+    degrees = _degrees_form(temp)
+
+    if temp > 0:
+        temp_spoken = f"плюс {temp_words} {degrees}"
+    elif temp < 0:
+        temp_spoken = f"минус {temp_words} {degrees}"
+    else:
+        temp_spoken = "ноль градусов"
+
+    return f"{temp_spoken}, {desc}"

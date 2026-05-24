@@ -17,10 +17,14 @@ class Mp3TalesScraper:
         Ищет сказку по названию и возвращает URL первой найденной страницы.
         """
         try:
-            # Кодируем запрос в Windows-1251 (CP1251)
+            # Кодируем запрос в Windows-1251 (CP1251) — нативная кодировка сайта
             encoded_query = query.encode('cp1251')
-            # Добавляем PageSpeed=noscript для обхода редиректов и упрощения верстки
-            url = f"{self.SEARCH_URL}?wp=1&s={urllib.parse.quote_plus(encoded_query)}&PageSpeed=noscript"
+            # Параметры поиска mp3tales.info:
+            #   s   — поисковый запрос
+            #   t   — режим AND (все слова должны встретиться)
+            #   wz  — искать в заглавиях
+            #   wp  — искать в описаниях
+            url = f"{self.SEARCH_URL}?s={urllib.parse.quote_plus(encoded_query)}&t=AND&wz=1&wp=1"
             
             print(f"🔍 [SCRAPER] Поиск на: {url}")
             response = requests.get(url, headers=self.headers, timeout=10)
