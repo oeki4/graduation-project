@@ -45,6 +45,12 @@ class VoiceAssistant:
         if os.name == "nt":
             self._init_windows_volume()
 
+        # На медленных I²S-DAC (voiceHAT, MAX98357A) при дефолтной
+        # маленькой латентности sounddevice не успевает заполнять буфер →
+        # underrun → хрипы. Принудительная высокая латентность даёт
+        # ~200–300 мс буфера и устраняет проблему.
+        sd.default.latency = "high"
+
         # Linux: автоматически находим имя главного микшера. На разных
         # звуковых платах оно отличается — Master, PCM, Digital, Speaker.
         # Если не определилось — берём Master как умолчание.
