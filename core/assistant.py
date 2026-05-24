@@ -383,7 +383,11 @@ class VoiceAssistant:
                 capture_output=True, text=True, timeout=2,
             )
             controls = out.stdout
-            for candidate in ("Master", "PCM", "Digital", "Speaker", "Playback"):
+            # SoftMaster — программный регулятор, который создаётся плагином
+            # softvol в ~/.asoundrc. Предпочитаем его, потому что на I²S-DAC
+            # (voiceHAT, MAX98357A) аппаратного управления громкостью нет
+            # и физический Master ничего не меняет.
+            for candidate in ("SoftMaster", "Master", "PCM", "Digital", "Speaker", "Playback"):
                 if f"'{candidate}'" in controls:
                     return candidate
         except Exception:
