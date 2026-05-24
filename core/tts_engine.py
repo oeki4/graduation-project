@@ -55,14 +55,15 @@ class TTSEngine:
             print(f"❌ Ошибка загрузки Silero TTS: {e}")
             raise
 
-    def speak(self, text):
+    def speak(self, text, volume: float = 1.0):
         """
         Синтезирует текст в речь и сразу воспроизводит.
 
-        Реализация специально использует int16 PCM и явный sd.OutputStream,
-        а не sd.play() с float32. Причина: ALSA-plug + dmix на Raspberry Pi
-        с I²S-усилителем (MAX98357A, voiceHAT и т. п.) при float32 выдаёт
-        хрипы и сильно занижает громкость. С int16 поток идёт чисто.
+        Параметр volume (0.0–1.0) — программное масштабирование PCM
+        перед воспроизведением. Используется на Linux/Pi, где
+        I²S-DAC не имеет аппаратной регулировки громкости.
+        На Windows volume игнорируется (там используется системная
+        громкость через pycaw).
         """
         if not text:
             return
@@ -78,8 +79,10 @@ class TTSEngine:
             )
             audio_f32 = audio_tensor.numpy()
 
-            # Конвертируем float32 → int16 с защитой от клиппинга
-            audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
+            # Конвертируем float32 → int16 с защитой от клиппинга.
+            # Применяем volume сразу здесь, пока ещё в float — точнее.
+            scaled_f32 = audio_f32 * (32767.0 * max(0.0, min(1.0, volume)))
+            audio_i16 = scaled_f32.clip(-32768, 32767).astype(np.int16)
 
             # На Linux (Raspberry Pi) воспроизводим через subprocess + aplay:
             # sounddevice на медленных I²S DAC даёт стену underrun-ов.

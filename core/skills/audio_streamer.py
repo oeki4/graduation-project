@@ -44,6 +44,22 @@ class AudioStreamer:
         # --- состояние для Linux-процесса ---
         self._current_playback_process: subprocess.Popen | None = None
 
+    def _apply_volume(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Программно масштабирует PCM int16 на коэффициент громкости из
+        assistant._software_volume. На I²S-DAC без аппаратной громкости
+        это единственный способ менять уровень звука при стриминге.
+        Применяется к каждому декодированному чанку перед write().
+        """
+        if self.assistant is None:
+            return audio
+        volume = getattr(self.assistant, "_software_volume", 1.0)
+        if volume >= 0.999:
+            return audio
+        # Масштабирование int16 через временный int32 (защита от overflow)
+        scaled = (audio.astype(np.int32) * volume).clip(-32768, 32767).astype(np.int16)
+        return scaled
+
     # ------------------------------------------------------------------
     # Публичный интерфейс
     # ------------------------------------------------------------------
@@ -162,8 +178,8 @@ class AudioStreamer:
                     out_stream.start()
                     print(f"▶️  [STREAMER] Радио: {rate} Гц, {channels} кан. — играю")
 
-                # Отправляем PCM в sounddevice (write блокирует пока есть место в буфере)
-                out_stream.write(audio)
+                # Применяем программную громкость и отправляем PCM в sounddevice
+                out_stream.write(self._apply_volume(audio))
                 accumulator.clear()
 
             print("✅ [STREAMER] Радио: поток завершён.")
@@ -345,15 +361,17 @@ class AudioStreamer:
             print(f"❌ [STREAMER] Ошибка декодирования MP3: {e}")
             return None, None, None
 
-    @staticmethod
-    def _play_audio(audio: np.ndarray, channels: int,
+    def _play_audio(self, audio: np.ndarray, channels: int,
                     sample_rate: int, stop_event: threading.Event) -> int:
         """
         Воспроизводит numpy-массив PCM через sounddevice.
         Возвращает количество фреймов, реально воспроизведённых до остановки.
+        Программная громкость применяется внутри callback'а, чтобы
+        изменения уровня вступали в силу в реальном времени.
         """
         pos = [0]
         done = threading.Event()
+        streamer = self  # для замыкания внутри callback
 
         def _callback(outdata, frames, _time, status):
             if stop_event.is_set():
@@ -363,7 +381,7 @@ class AudioStreamer:
 
             start = pos[0]
             end = start + frames
-            chunk = audio[start:end]
+            chunk = streamer._apply_volume(audio[start:end])
 
             if len(chunk) == 0:
                 outdata[:] = 0

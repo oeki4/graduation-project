@@ -52,13 +52,12 @@ class VoiceAssistant:
         # ~200–300 мс буфера и устраняет проблему.
         sd.default.latency = "high"
 
-        # Linux: автоматически находим имя главного микшера. На разных
-        # звуковых платах оно отличается — Master, PCM, Digital, Speaker.
-        # Если не определилось — берём Master как умолчание.
-        self._alsa_mixer = None
-        if os.name == "posix":
-            self._alsa_mixer = self._detect_alsa_mixer() or "Master"
-            logger.system("AUDIO", f"микшер ALSA: {self._alsa_mixer}")
+        # Программная громкость для Linux (0.0–1.0). I²S-DAC без аппаратной
+        # регулировки громкости — ALSA Master там бутафорский. Поэтому
+        # масштабируем PCM-данные сами перед отправкой в aplay/sounddevice.
+        # На Windows используется аппаратная регулировка через pycaw.
+        self._software_volume = 1.0
+
 
         # Диагностика аудиоустройств — полезно при первой настройке на Pi
         if os.environ.get("AUDIO_DEBUG"):
@@ -113,8 +112,12 @@ class VoiceAssistant:
         logger.step("🔊", "TTS", f"«{text}»")
         self._is_speaking = True
         try:
+            # На Linux передаём программную громкость в TTS, чтобы он
+            # масштабировал PCM перед aplay. На Windows громкость
+            # регулируется системно (pycaw), TTS гонит сэмплы как есть.
+            volume = self._software_volume if os.name == "posix" else 1.0
             with logger.Timer("синтез + воспроизведение"):
-                self.tts.speak(text)
+                self.tts.speak(text, volume=volume)
         finally:
             self._is_speaking = False
 
@@ -135,9 +138,12 @@ class VoiceAssistant:
             # (mpg123 для MP3, aplay для WAV). Sounddevice на медленном
             # I²S DAC даёт underrun, см. подробности в tts_engine.py.
             if os.name == "posix":
+                # mpg123 -f принимает целое 0–32768 (32768 = 100%) —
+                # программное масштабирование без правки ALSA.
                 if file_path.lower().endswith(".mp3"):
+                    vol_factor = int(self._software_volume * 32768)
                     subprocess.run(
-                        ["mpg123", "-q", file_path],
+                        ["mpg123", "-q", "-f", str(vol_factor), file_path],
                         stderr=subprocess.DEVNULL,
                         check=False,
                     )
@@ -301,16 +307,7 @@ class VoiceAssistant:
     def _get_current_volume(self) -> int | None:
         """Возвращает текущую системную громкость 0–100, или None при ошибке."""
         if os.name == "posix":
-            try:
-                import subprocess
-                out = subprocess.run(
-                    ["amixer", "get", self._alsa_mixer],
-                    capture_output=True, text=True, timeout=2,
-                )
-                m = re.search(r"\[(\d+)%\]", out.stdout)
-                return int(m.group(1)) if m else None
-            except Exception:
-                return None
+            return int(round(self._software_volume * 100))
         else:
             if self._win_volume_iface is None:
                 return None
@@ -369,58 +366,19 @@ class VoiceAssistant:
     # Управление системной громкостью
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _detect_alsa_mixer() -> str | None:
-        """
-        Находит главный (master) микшер. На разных звуковых платах он
-        называется по-разному: на встроенной — Master, на USB-DAC — PCM,
-        на I²S-HAT часто Digital или Speaker.
-        """
-        try:
-            import subprocess
-            out = subprocess.run(
-                ["amixer", "scontrols"],
-                capture_output=True, text=True, timeout=2,
-            )
-            controls = out.stdout
-            # SoftMaster — программный регулятор, который создаётся плагином
-            # softvol в ~/.asoundrc. Предпочитаем его, потому что на I²S-DAC
-            # (voiceHAT, MAX98357A) аппаратного управления громкостью нет
-            # и физический Master ничего не меняет.
-            for candidate in ("SoftMaster", "Master", "PCM", "Digital", "Speaker", "Playback"):
-                if f"'{candidate}'" in controls:
-                    return candidate
-        except Exception:
-            pass
-        return None
-
-    def _amixer_run(self, *args):
-        """Запуск amixer с подавлением stdout/stderr (иначе шумит в лог)."""
-        try:
-            import subprocess
-            subprocess.run(
-                ["amixer", "sset", self._alsa_mixer, *args],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-                check=False,
-            )
-        except Exception as e:
-            logger.warn(f"amixer ошибка: {e}")
-
     def _volume_up(self):
-        """Увеличивает системную громкость на ~10%."""
+        """Увеличивает громкость на 10%."""
         if os.name == "posix":
-            self._amixer_run("10%+")
+            self._software_volume = min(1.0, self._software_volume + 0.10)
         else:
             import ctypes
             ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)
 
     def _volume_down(self):
-        """Уменьшает системную громкость на ~10%."""
+        """Уменьшает громкость на 10%."""
         if os.name == "posix":
-            self._amixer_run("10%-")
+            self._software_volume = max(0.0, self._software_volume - 0.10)
         else:
             import ctypes
             ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)
@@ -428,13 +386,13 @@ class VoiceAssistant:
 
     def _set_volume(self, level: int):
         """
-        Устанавливает системную громкость в процентах (0–100).
-        Windows: закэшированный COM-интерфейс pycaw.
-        Linux: amixer на автодетектированном микшере.
+        Устанавливает громкость в процентах (0–100).
+        Windows: системная громкость через pycaw.
+        Linux: программное масштабирование PCM-данных в коде (см. speak/aplay).
         """
         level = max(0, min(100, level))
         if os.name == "posix":
-            self._amixer_run(f"{level}%")
+            self._software_volume = level / 100.0
         else:
             if self._win_volume_iface is None:
                 return
