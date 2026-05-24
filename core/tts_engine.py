@@ -1,5 +1,8 @@
 import os
 import sys
+import wave
+import tempfile
+import subprocess
 import torch
 import numpy as np
 import sounddevice as sd
@@ -78,10 +81,44 @@ class TTSEngine:
             # Конвертируем float32 → int16 с защитой от клиппинга
             audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
 
-            # sd.play() со встроенным callback'ом и блокирующим ожиданием
-            # держит буфер сам и не даёт underrun на медленных I²S DAC.
-            # blocking=True заменяет связку sd.play()+sd.wait().
-            sd.play(audio_i16, self.sample_rate, blocking=True)
+            # На Linux (Raspberry Pi) воспроизводим через subprocess + aplay:
+            # sounddevice на медленных I²S DAC даёт стену underrun-ов.
+            # aplay — родная утилита ALSA, сама управляет буферами, проверена.
+            if os.name == "posix":
+                _play_pcm_via_aplay(audio_i16, self.sample_rate, channels=1)
+            else:
+                sd.play(audio_i16, self.sample_rate, blocking=True)
 
         except Exception as e:
             print(f"❌ Ошибка при синтезе речи: {e}")
+
+
+def _play_pcm_via_aplay(audio_i16: np.ndarray, sample_rate: int, channels: int = 1):
+    """
+    Пишет PCM-массив в временный WAV-файл и проигрывает через aplay.
+
+    Использовать только на Linux. Это самый надёжный способ воспроизведения
+    на Raspberry Pi с I²S-усилителем — обходит проблемы sounddevice/PortAudio
+    с буферизацией на медленных DAC.
+    """
+    # Создаём временный WAV-файл с нужным форматом
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+    try:
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(2)  # int16 = 2 байта
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio_i16.tobytes())
+
+        # aplay -q: тихий режим, без вывода в консоль
+        subprocess.run(
+            ["aplay", "-q", tmp_path],
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass

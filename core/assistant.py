@@ -6,6 +6,7 @@ from skills.audio_streamer import AudioStreamer
 import logger
 import sys
 import re
+import subprocess
 import sounddevice as sd
 import soundfile as sf
 import os
@@ -130,12 +131,26 @@ class VoiceAssistant:
             return
 
         try:
-            # dtype='int16' принципиально — sf.read() по умолчанию
-            # возвращает float64, что плохо ложится на ALSA-plug+dmix
-            data, fs = sf.read(file_path, dtype="int16")
-            # sd.play(blocking=True) сам управляет буфером — на I²S это
-            # надёжнее, чем OutputStream.write() (нет underrun'ов).
-            sd.play(data, fs, blocking=True)
+            # На Linux (Pi) для надёжности используем subprocess + aplay
+            # (mpg123 для MP3, aplay для WAV). Sounddevice на медленном
+            # I²S DAC даёт underrun, см. подробности в tts_engine.py.
+            if os.name == "posix":
+                if file_path.lower().endswith(".mp3"):
+                    subprocess.run(
+                        ["mpg123", "-q", file_path],
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                else:
+                    subprocess.run(
+                        ["aplay", "-q", file_path],
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+            else:
+                # На Windows sounddevice работает нормально
+                data, fs = sf.read(file_path, dtype="int16")
+                sd.play(data, fs, blocking=True)
         except Exception as e:
             print(f"❌ Ошибка воспроизведения звука: {e}")
 
