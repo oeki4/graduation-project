@@ -77,6 +77,12 @@ class VoiceAssistant:
         # чтобы не сработать повторно.
         self._quick_stop_pending = False
 
+        # Флаг: сейчас выполняется долгий TTS-пайплайн (гороскоп и т. п.).
+        # Используется в is_audio_playing(), чтобы перекрыть паузы между
+        # отдельными aplay-процессами (когда tts.is_playing() = False
+        # на доли секунды между фразами).
+        self._tts_pipeline_active = False
+
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
@@ -187,6 +193,8 @@ class VoiceAssistant:
 
     def is_audio_playing(self) -> bool:
         """Любое активное воспроизведение: TTS, радио, сказка, пайплайн."""
+        if self._tts_pipeline_active:
+            return True
         try:
             if self.tts.is_playing():
                 return True

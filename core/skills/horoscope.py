@@ -13,6 +13,7 @@
 import os
 import sys
 import re
+import time
 import threading
 from queue import Queue
 import requests
@@ -224,6 +225,16 @@ def _play_pipelined(sentences: list[str], assistant):
     for s in sentences:
         assistant._recent_tts_phrases.append(s.lower())
 
+    # Между предложениями делаем короткую паузу: пока ассистент молчит,
+    # Vosk получает чистый звук с микрофона и может расслышать «стой».
+    # Без пауз TTS играет непрерывно и команда «стой» теряется в шуме.
+    GAP_SEC = 0.6
+
+    # Снижаем громкость на время пайплайна, чтобы микрофон лучше расслышал
+    # пользователя поверх собственной речи ассистента. Базовая громкость
+    # восстанавливается после окончания/прерывания гороскопа.
+    VOLUME_DUCK = 0.65
+
     def producer():
         for sentence in sentences:
             if cancel.is_set():
@@ -235,22 +246,39 @@ def _play_pipelined(sentences: list[str], assistant):
                 logger.err(f"Сбой синтеза предложения: {e}")
         ready.put(SENTINEL)
 
-    threading.Thread(target=producer, daemon=True).start()
+    assistant._tts_pipeline_active = True
+    try:
+        threading.Thread(target=producer, daemon=True).start()
 
-    while True:
-        if cancel.is_set():
-            break
-        item = ready.get()
-        if item is SENTINEL:
-            break
-        if cancel.is_set():
-            break
-        try:
-            volume = (assistant._software_volume
-                      if os.name == "posix" else 1.0)
-            tts.play_cached(item, volume=volume)
-        except Exception as e:
-            logger.err(f"Сбой воспроизведения: {e}")
+        first = True
+        while True:
+            if cancel.is_set():
+                break
+            item = ready.get()
+            if item is SENTINEL:
+                break
+            if cancel.is_set():
+                break
+
+            # Пауза между предложениями (но не перед первым)
+            if not first:
+                # Дробим паузу на куски — проверяем cancel чаще
+                for _ in range(int(GAP_SEC * 10)):
+                    if cancel.is_set():
+                        break
+                    time.sleep(0.1)
+                if cancel.is_set():
+                    break
+            first = False
+
+            try:
+                base_vol = (assistant._software_volume
+                            if os.name == "posix" else 1.0)
+                tts.play_cached(item, volume=base_vol * VOLUME_DUCK)
+            except Exception as e:
+                logger.err(f"Сбой воспроизведения: {e}")
+    finally:
+        assistant._tts_pipeline_active = False
 
     if cancel.is_set():
         logger.detail("гороскоп прерван пользователем")
