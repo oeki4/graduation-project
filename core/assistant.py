@@ -23,6 +23,23 @@ _QUICK_STOP_WORDS = (
 )
 
 
+def _is_clean_stop_command(text: str) -> bool:
+    """
+    True, если в реплике явно содержится стоп-команда.
+    Чтобы избежать ложных срабатываний на partial-распознавании эха
+    собственной TTS (где могут случайно проскочить похожие слова),
+    требуем чтобы реплика была короткой (1–4 слова) и хотя бы одно
+    из слов точно совпадало со стоп-словом.
+    """
+    text = (text or "").strip().lower()
+    if not text:
+        return False
+    words = text.split()
+    if not (1 <= len(words) <= 4):
+        return False
+    return any(w in _QUICK_STOP_WORDS for w in words)
+
+
 class VoiceAssistant:
     def __init__(self, name="Ассистент"):
         self.name = name.lower()
@@ -54,6 +71,11 @@ class VoiceAssistant:
         # сказали — игнорируем (это собственный голос из микрофона).
         from collections import deque
         self._recent_tts_phrases: deque = deque(maxlen=8)
+
+        # Флаг: quick-stop уже сработал на partial-результате.
+        # Финал, который потом придёт от Vosk, нужно проигнорировать,
+        # чтобы не сработать повторно.
+        self._quick_stop_pending = False
 
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
@@ -294,32 +316,46 @@ class VoiceAssistant:
                 text = result["text"].lower()
 
                 # Partial: предварительное распознавание ещё до финальной паузы.
-                # Если в нём появилось имя ассистента — немедленно приглушаем
-                # фоновое воспроизведение, чтобы лучше расслышать команду.
-                # Срабатывает ДАЖЕ если TTS сейчас говорит — пользователь
-                # должен иметь возможность прервать длинный гороскоп.
+                # Здесь же ловим quick-stop — пока громко играет TTS, Vosk
+                # может НЕ вернуть финал до конца воспроизведения (нет паузы
+                # в звуковом потоке). Поэтому реагируем прямо на partial.
                 if result["type"] == "partial":
-                    if text and self.name in text:
-                        self._duck_audio()
-                    continue
-
-                # Quick-stop: если сейчас что-то играет (гороскоп, радио,
-                # сказка, длинная TTS-фраза), короткие стоп-слова принимаются
-                # БЕЗ wake-word. Это даёт возможность мгновенно прервать
-                # длинное воспроизведение естественной командой «стой».
-                if self.is_audio_playing():
-                    if any(kw in text for kw in _QUICK_STOP_WORDS):
-                        print(f"\n👤 {logger.C.BOLD}Quick-stop:{logger.C.RESET} «{text}»")
-                        logger.step("⏹️ ", "Прерывание воспроизведения без wake-word")
+                    if (self.is_audio_playing()
+                            and not self._quick_stop_pending
+                            and _is_clean_stop_command(text)):
+                        print(f"\n👤 {logger.C.BOLD}Quick-stop (partial):{logger.C.RESET} «{text}»")
+                        logger.step("⏹️ ", "Прерывание (partial-trigger)")
+                        self._quick_stop_pending = True
                         self._stop_all_audio()
-                        # Короткое голосовое подтверждение
                         try:
                             self.speak("Остановлено.")
                         finally:
                             self._unduck_audio()
-                        continue
+                    elif text and self.name in text:
+                        self._duck_audio()
+                    continue
 
                 # Final: команда распознана целиком.
+
+                # Если quick-stop уже сработал на partial — финал, который
+                # сейчас пришёл, это та же реплика пользователя. Пропускаем.
+                if self._quick_stop_pending:
+                    self._quick_stop_pending = False
+                    self._unduck_audio()
+                    continue
+
+                # Quick-stop в финале — на случай, если partial по какой-то
+                # причине не успел отработать (тишина, быстрая команда).
+                if self.is_audio_playing() and _is_clean_stop_command(text):
+                    print(f"\n👤 {logger.C.BOLD}Quick-stop:{logger.C.RESET} «{text}»")
+                    logger.step("⏹️ ", "Прерывание воспроизведения без wake-word")
+                    self._stop_all_audio()
+                    try:
+                        self.speak("Остановлено.")
+                    finally:
+                        self._unduck_audio()
+                    continue
+
                 # Защита от эха: если в реплике нет имени ассистента, а слова
                 # сильно совпадают с недавно произнесённым TTS — пропускаем.
                 if self._is_tts_echo(text):
