@@ -34,6 +34,17 @@ class VoiceAssistant:
         self._duck_target_pct = 25
         self._duck_watchdog_sec = 15.0
 
+        # Сигнал отмены TTS-пайплайна (например, длинный гороскоп
+        # с фоновым синтезом следующих предложений). Когда _stop_all_audio()
+        # выставляет его, продюсер и консумер пайплайна прерываются.
+        self._tts_cancel_event = threading.Event()
+
+        # История недавних TTS-фраз для защиты от эха: если Vosk
+        # распознал что-то очень похожее на то, что мы только что
+        # сказали — игнорируем (это собственный голос из микрофона).
+        from collections import deque
+        self._recent_tts_phrases: deque = deque(maxlen=8)
+
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
@@ -111,6 +122,8 @@ class VoiceAssistant:
         """
         logger.step("🔊", "TTS", f"«{text}»")
         self._is_speaking = True
+        # Запоминаем фразу для защиты от эха в start()
+        self._recent_tts_phrases.append(text.lower())
         try:
             # На Linux передаём программную громкость в TTS, чтобы он
             # масштабировал PCM перед aplay. На Windows громкость
@@ -120,6 +133,48 @@ class VoiceAssistant:
                 self.tts.speak(text, volume=volume)
         finally:
             self._is_speaking = False
+
+    def _stop_all_audio(self):
+        """
+        Прерывает любое текущее воспроизведение: радио/сказку,
+        TTS-aplay (если играет), TTS-пайплайн (например, длинный гороскоп).
+        Вызывается перед каждой новой пользовательской командой.
+        """
+        # 1. Радио / сказки
+        try:
+            self.streamer.stop()
+        except Exception:
+            pass
+        # 2. Текущий aplay-процесс TTS — убиваем
+        try:
+            self.tts.stop_playback()
+        except Exception:
+            pass
+        # 3. Пайплайн-синтез (гороскоп и т. п.) — сигнал отмены
+        self._tts_cancel_event.set()
+
+    def _is_tts_echo(self, recognized: str) -> bool:
+        """
+        Проверяет, не является ли распознанный текст эхом собственной речи.
+        Эвристика: если в строке нет имени ассистента, а большинство её
+        слов совпадает с одной из недавних TTS-фраз — это эхо.
+        """
+        if not recognized.strip():
+            return False
+        # Если есть имя ассистента — это явное обращение, не эхо
+        if self.name in recognized:
+            return False
+        words = re.findall(r"[а-яёa-z]+", recognized.lower())
+        if len(words) < 2:
+            return False
+        for phrase in self._recent_tts_phrases:
+            phrase_words = set(re.findall(r"[а-яёa-z]+", phrase.lower()))
+            if not phrase_words:
+                continue
+            match = sum(1 for w in words if w in phrase_words)
+            if match / len(words) > 0.6:
+                return True
+        return False
 
     def _play_sound(self, file_path):
         """
@@ -217,14 +272,18 @@ class VoiceAssistant:
                 # Partial: предварительное распознавание ещё до финальной паузы.
                 # Если в нём появилось имя ассистента — немедленно приглушаем
                 # фоновое воспроизведение, чтобы лучше расслышать команду.
+                # Срабатывает ДАЖЕ если TTS сейчас говорит — пользователь
+                # должен иметь возможность прервать длинный гороскоп.
                 if result["type"] == "partial":
-                    if text and self.name in text and not self._is_speaking:
+                    if text and self.name in text:
                         self._duck_audio()
                     continue
 
-                # Final: команда распознана целиком, можно обрабатывать.
-                if self._is_speaking:
-                    # TTS говорит — игнорируем эхо
+                # Final: команда распознана целиком.
+                # Защита от эха: если в реплике нет имени ассистента, а слова
+                # сильно совпадают с недавно произнесённым TTS — пропускаем.
+                if self._is_tts_echo(text):
+                    logger.detail(f"эхо собственного TTS — игнорирую: «{text}»")
                     self._unduck_audio()
                     continue
 
@@ -460,7 +519,8 @@ class VoiceAssistant:
                  "остановить", "замолчи", "хватит", "отстань",
                  "выключи радио", "выключи сказку", "stop"):
             logger.step("⏹️ ", "Системная команда", "СТОП (прерывает воспроизведение)")
-            self.streamer.stop()
+            self._stop_all_audio()
+            self._tts_cancel_event.clear()
             self.speak("Остановлено.")
             logger.end_section()
             return
@@ -495,7 +555,9 @@ class VoiceAssistant:
 
         # ── 2. Прерывание текущего воспроизведения (barge-in) ─────────
         logger.step("✂️ ", "Barge-in: остановка текущего воспроизведения")
-        self.streamer.stop()
+        self._stop_all_audio()
+        # Сбрасываем сигнал отмены — следующий пайплайн начнётся «чистым»
+        self._tts_cancel_event.clear()
 
         # ── 3. Системные команды управления питанием ──────────────────
         if any(w in t for w in ("перезагрузи", "перезагрузка", "ребут", "reboot")):

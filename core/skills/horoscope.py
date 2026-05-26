@@ -200,13 +200,26 @@ def _play_pipelined(sentences: list[str], assistant):
     В результате пользователь слышит непрерывную речь без пауз между
     предложениями. Время до первого звука = время синтеза первого
     предложения (~2-3 сек), а не суммарное (которое было бы 20+ сек).
+
+    Прерывание: пользователь может сказать «стой» или новую команду —
+    assistant._stop_all_audio() выставит _tts_cancel_event, продьюсер
+    и консумер прекратят работу, текущий aplay-процесс будет убит.
     """
     tts = assistant.tts
+    cancel = assistant._tts_cancel_event
+    cancel.clear()
     ready: Queue = Queue(maxsize=4)
     SENTINEL = object()
 
+    # Регистрируем все предложения в истории TTS — это защищает от
+    # «ассистент услышал свой же гороскоп в микрофоне и снова его запустил»
+    for s in sentences:
+        assistant._recent_tts_phrases.append(s.lower())
+
     def producer():
         for sentence in sentences:
+            if cancel.is_set():
+                break
             try:
                 cache_file = tts.synthesize_to_cache(sentence)
                 ready.put(cache_file)
@@ -217,8 +230,12 @@ def _play_pipelined(sentences: list[str], assistant):
     threading.Thread(target=producer, daemon=True).start()
 
     while True:
+        if cancel.is_set():
+            break
         item = ready.get()
         if item is SENTINEL:
+            break
+        if cancel.is_set():
             break
         try:
             volume = (assistant._software_volume
@@ -226,3 +243,6 @@ def _play_pipelined(sentences: list[str], assistant):
             tts.play_cached(item, volume=volume)
         except Exception as e:
             logger.err(f"Сбой воспроизведения: {e}")
+
+    if cancel.is_set():
+        logger.detail("гороскоп прерван пользователем")

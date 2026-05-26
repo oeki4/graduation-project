@@ -3,6 +3,7 @@ import sys
 import wave
 import tempfile
 import subprocess
+import threading
 import hashlib
 from pathlib import Path
 import torch
@@ -48,6 +49,11 @@ class TTSEngine:
         # синтезируются один раз, потом мгновенно играются из WAV).
         self.cache_dir = Path(__file__).parent / "assets" / "tts_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Текущий aplay-процесс (Linux) — хранится, чтобы можно было
+        # прервать воспроизведение извне через stop_playback().
+        self._proc_lock = threading.Lock()
+        self._current_proc: subprocess.Popen | None = None
 
         try:
             # Загрузка модели из torch hub (при первом запуске скачается кэш)
@@ -125,9 +131,55 @@ class TTSEngine:
             ).astype(np.int16)
 
         if os.name == "posix":
-            _play_pcm_via_aplay(audio_i16, self.sample_rate, channels=1)
+            self._play_pcm_via_aplay_managed(audio_i16, self.sample_rate, channels=1)
         else:
             sd.play(audio_i16, self.sample_rate, blocking=True)
+
+    def _play_pcm_via_aplay_managed(self, audio_i16, sample_rate, channels=1):
+        """
+        То же, что _play_pcm_via_aplay, но через subprocess.Popen — даёт
+        возможность извне прервать воспроизведение через stop_playback().
+        """
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            tmp_path = f.name
+        try:
+            with wave.open(tmp_path, "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(audio_i16.tobytes())
+
+            proc = subprocess.Popen(
+                ["aplay", "-q", tmp_path],
+                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+            )
+            with self._proc_lock:
+                self._current_proc = proc
+            try:
+                proc.wait()
+            finally:
+                with self._proc_lock:
+                    if self._current_proc is proc:
+                        self._current_proc = None
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    def stop_playback(self):
+        """
+        Прерывает текущее воспроизведение (если играет aplay).
+        Используется при barge-in: пользователь сказал новую команду
+        во время длинной TTS-фразы или гороскопа.
+        """
+        with self._proc_lock:
+            if self._current_proc is not None:
+                try:
+                    self._current_proc.terminate()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Файловый кэш синтезированных фраз
