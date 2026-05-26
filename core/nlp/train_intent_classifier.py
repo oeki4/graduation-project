@@ -1,7 +1,7 @@
 """
 Скрипт для обучения TextCategorizer для определения интентов голосового ассистента.
 Поддерживаемые интенты: включить_сказку, узнать_погоду, включить_радио,
-                       поставить_таймер, другой_интент.
+                       поставить_таймер, узнать_гороскоп, другой_интент.
 """
 import spacy
 from spacy.training import Example
@@ -36,12 +36,13 @@ def create_training_data():
     weather_examples   = _load_examples("weather.txt",   "узнать_погоду")
     radio_examples     = _load_examples("radio.txt",     "включить_радио")
     timer_examples     = _load_examples("timer.txt",     "поставить_таймер")
+    horoscope_examples = _load_examples("horoscope.txt", "узнать_гороскоп")
     other_examples     = _load_examples("other.txt",     "другой_интент")
 
     # Базовый шаблон ярлыков (все нули) — копируем и ставим 1.0 у нужного
     def _cats(active_label: str) -> dict:
         labels = ["включить_сказку", "узнать_погоду", "включить_радио",
-                  "поставить_таймер", "другой_интент"]
+                  "поставить_таймер", "узнать_гороскоп", "другой_интент"]
         return {label: (1.0 if label == active_label else 0.0) for label in labels}
 
     training_data = []
@@ -53,6 +54,8 @@ def create_training_data():
         training_data.append({"text": text, "cats": _cats("включить_радио")})
     for text in timer_examples:
         training_data.append({"text": text, "cats": _cats("поставить_таймер")})
+    for text in horoscope_examples:
+        training_data.append({"text": text, "cats": _cats("узнать_гороскоп")})
     for text in other_examples:
         training_data.append({"text": text, "cats": _cats("другой_интент")})
 
@@ -71,7 +74,7 @@ def evaluate_model(nlp, validation_examples):
     
     # Метрики для каждой категории
     categories = ["включить_сказку", "узнать_погоду", "включить_радио",
-                  "поставить_таймер", "другой_интент"]
+                  "поставить_таймер", "узнать_гороскоп", "другой_интент"]
     category_metrics = {cat: {"tp": 0, "fp": 0, "fn": 0} for cat in categories}
     
     for example in validation_examples:
@@ -181,6 +184,7 @@ def train_model(output_dir="models/intent_model", n_iter=40, patience=10, train_
     textcat.add_label("узнать_погоду")
     textcat.add_label("включить_радио")
     textcat.add_label("поставить_таймер")
+    textcat.add_label("узнать_гороскоп")
     textcat.add_label("другой_интент")
     
     # Создаём обучающие данные
@@ -191,6 +195,7 @@ def train_model(output_dir="models/intent_model", n_iter=40, patience=10, train_
     print(f"  - Примеров 'узнать_погоду':  {sum(1 for ex in training_data if ex['cats']['узнать_погоду'] == 1.0)}")
     print(f"  - Примеров 'включить_радио': {sum(1 for ex in training_data if ex['cats']['включить_радио'] == 1.0)}")
     print(f"  - Примеров 'поставить_таймер':   {sum(1 for ex in training_data if ex['cats']['поставить_таймер'] == 1.0)}")
+    print(f"  - Примеров 'узнать_гороскоп':    {sum(1 for ex in training_data if ex['cats']['узнать_гороскоп'] == 1.0)}")
     print(f"  - Примеров 'другой_интент':  {sum(1 for ex in training_data if ex['cats']['другой_интент'] == 1.0)}")
     
     # Преобразуем данные в формат Example
@@ -424,6 +429,16 @@ def test_model(nlp, test_texts):
         "таймер на 2 часа": "поставить_таймер",
         "отмени таймер": "поставить_таймер",
 
+        # Положительные примеры гороскопов
+        "гороскоп для овна": "узнать_гороскоп",
+        "мой гороскоп близнецы": "узнать_гороскоп",
+        "что говорят звезды": "узнать_гороскоп",
+        "узнай гороскоп для скорпиона": "узнать_гороскоп",
+        "прогноз для льва": "узнать_гороскоп",
+        "астропрогноз для рыб": "узнать_гороскоп",
+        "расскажи мой гороскоп": "узнать_гороскоп",
+        "гороскоп козерога": "узнать_гороскоп",
+
         # Отрицательные примеры
         "включи музыку": "другой_интент",
         "расскажи новости": "другой_интент",
@@ -438,7 +453,7 @@ def test_model(nlp, test_texts):
     }
     
     categories = ["включить_сказку", "узнать_погоду", "включить_радио",
-                  "поставить_таймер", "другой_интент"]
+                  "поставить_таймер", "узнать_гороскоп", "другой_интент"]
 
     for text in test_texts:
         doc = nlp(text)
@@ -464,6 +479,7 @@ def test_model(nlp, test_texts):
               f"погода={scores['узнать_погоду']:.2%}, "
               f"радио={scores['включить_радио']:.2%}, "
               f"таймер={scores['поставить_таймер']:.2%}, "
+              f"гороскоп={scores['узнать_гороскоп']:.2%}, "
               f"другое={scores['другой_интент']:.2%}")
         if expected != "неизвестно":
             print(f"   Ожидалось: {expected}")
@@ -566,6 +582,15 @@ if __name__ == "__main__":
         "напомни через 15 минут",
         "таймер на 2 часа",
         "отмени таймер",
+        # Тестовые гороскопы
+        "гороскоп для овна",
+        "мой гороскоп близнецы",
+        "что говорят звезды",
+        "узнай гороскоп для скорпиона",
+        "прогноз для льва",
+        "астропрогноз для рыб",
+        "расскажи мой гороскоп",
+        "гороскоп козерога",
     ]
     
     test_model(nlp, test_texts)

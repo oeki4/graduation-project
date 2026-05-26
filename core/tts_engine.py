@@ -79,43 +79,55 @@ class TTSEngine:
             return
 
         try:
-            cache_file = self._cache_path(text)
-
-            if cache_file.exists():
-                # Cache HIT — читаем готовый WAV, не зовём Silero
-                logger.system("TTS", f"кэш: {cache_file.name[:8]}…")
-                audio_i16 = self._read_wav_int16(cache_file)
-            else:
-                # Cache MISS — синтезируем и сохраняем для будущих вызовов
-                logger.system("TTS", "синтез (нет в кэше)")
-                audio_tensor = self.model.apply_tts(
-                    text=text,
-                    speaker=self.speaker,
-                    sample_rate=self.sample_rate,
-                    put_accent=True,
-                    put_yo=True,
-                )
-                audio_f32 = audio_tensor.numpy()
-                audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
-                # Сохраняем «сырой» PCM (без громкости) — громкость
-                # применяется при каждом воспроизведении отдельно.
-                self._write_wav_int16(cache_file, audio_i16)
-
-            # Применяем программную громкость
-            vol = max(0.0, min(1.0, volume))
-            if vol < 0.999:
-                audio_i16 = (audio_i16.astype(np.float32) * vol).clip(
-                    -32768, 32767
-                ).astype(np.int16)
-
-            # Воспроизводим
-            if os.name == "posix":
-                _play_pcm_via_aplay(audio_i16, self.sample_rate, channels=1)
-            else:
-                sd.play(audio_i16, self.sample_rate, blocking=True)
-
+            cache_file = self.synthesize_to_cache(text)
+            self.play_cached(cache_file, volume=volume)
         except Exception as e:
             print(f"❌ Ошибка при синтезе речи: {e}")
+
+    def synthesize_to_cache(self, text: str) -> Path:
+        """
+        Синтезирует фразу и сохраняет в кэш. Возвращает путь к WAV.
+        Если фраза уже есть в кэше — возвращает существующий путь без
+        пересинтеза.
+
+        Метод можно вызывать отдельно от воспроизведения — например,
+        для пайплайн-синтеза в фоне (синтезируем N+1, пока играет N).
+        """
+        cache_file = self._cache_path(text)
+
+        if cache_file.exists():
+            logger.system("TTS", f"кэш: {cache_file.name[:8]}…")
+            return cache_file
+
+        logger.system("TTS", "синтез (нет в кэше)")
+        audio_tensor = self.model.apply_tts(
+            text=text,
+            speaker=self.speaker,
+            sample_rate=self.sample_rate,
+            put_accent=True,
+            put_yo=True,
+        )
+        audio_f32 = audio_tensor.numpy()
+        audio_i16 = (audio_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
+        # Сохраняем «сырой» PCM (без громкости) — громкость
+        # применяется при каждом воспроизведении отдельно.
+        self._write_wav_int16(cache_file, audio_i16)
+        return cache_file
+
+    def play_cached(self, cache_file: Path, volume: float = 1.0):
+        """Воспроизводит готовый WAV из кэша с применением громкости."""
+        audio_i16 = self._read_wav_int16(cache_file)
+
+        vol = max(0.0, min(1.0, volume))
+        if vol < 0.999:
+            audio_i16 = (audio_i16.astype(np.float32) * vol).clip(
+                -32768, 32767
+            ).astype(np.int16)
+
+        if os.name == "posix":
+            _play_pcm_via_aplay(audio_i16, self.sample_rate, channels=1)
+        else:
+            sd.play(audio_i16, self.sample_rate, blocking=True)
 
     # ------------------------------------------------------------------
     # Файловый кэш синтезированных фраз
