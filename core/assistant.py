@@ -83,6 +83,10 @@ class VoiceAssistant:
         # на доли секунды между фразами).
         self._tts_pipeline_active = False
 
+        # Для диагностического логирования VOSK_DEBUG: чтобы не печатать
+        # один и тот же partial много раз подряд.
+        self._last_partial = ""
+
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
@@ -328,6 +332,15 @@ class VoiceAssistant:
                 # может НЕ вернуть финал до конца воспроизведения (нет паузы
                 # в звуковом потоке). Поэтому реагируем прямо на partial.
                 if result["type"] == "partial":
+                    # Диагностика: если включён VOSK_DEBUG, печатаем все
+                    # ненулевые партиалы во время воспроизведения — видно,
+                    # что Vosk реально слышит из микрофона поверх TTS
+                    if (os.environ.get("VOSK_DEBUG") and text.strip()
+                            and self.is_audio_playing()
+                            and text != self._last_partial):
+                        print(f"  {logger.C.GRAY}[vosk-partial] «{text}»{logger.C.RESET}")
+                        self._last_partial = text
+
                     if (self.is_audio_playing()
                             and not self._quick_stop_pending
                             and _is_clean_stop_command(text)):
