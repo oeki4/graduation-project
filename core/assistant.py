@@ -13,6 +13,16 @@ import os
 import threading
 
 
+# Слова для quick-stop: можно сказать без «ассистент», пока что-то играет.
+# Только однозначные команды немедленной остановки — без «тише» (это
+# регулировка громкости) и «выключи» (двусмысленно: остановить или выключить Pi).
+_QUICK_STOP_WORDS = (
+    "стоп", "стой", "стопп",
+    "хватит", "замолчи", "помолчи",
+    "остановись", "остановить", "отстань",
+)
+
+
 class VoiceAssistant:
     def __init__(self, name="Ассистент"):
         self.name = name.lower()
@@ -153,6 +163,20 @@ class VoiceAssistant:
         # 3. Пайплайн-синтез (гороскоп и т. п.) — сигнал отмены
         self._tts_cancel_event.set()
 
+    def is_audio_playing(self) -> bool:
+        """Любое активное воспроизведение: TTS, радио, сказка, пайплайн."""
+        try:
+            if self.tts.is_playing():
+                return True
+        except Exception:
+            pass
+        try:
+            if self.streamer.is_active():
+                return True
+        except Exception:
+            pass
+        return False
+
     def _is_tts_echo(self, recognized: str) -> bool:
         """
         Проверяет, не является ли распознанный текст эхом собственной речи.
@@ -278,6 +302,22 @@ class VoiceAssistant:
                     if text and self.name in text:
                         self._duck_audio()
                     continue
+
+                # Quick-stop: если сейчас что-то играет (гороскоп, радио,
+                # сказка, длинная TTS-фраза), короткие стоп-слова принимаются
+                # БЕЗ wake-word. Это даёт возможность мгновенно прервать
+                # длинное воспроизведение естественной командой «стой».
+                if self.is_audio_playing():
+                    if any(kw in text for kw in _QUICK_STOP_WORDS):
+                        print(f"\n👤 {logger.C.BOLD}Quick-stop:{logger.C.RESET} «{text}»")
+                        logger.step("⏹️ ", "Прерывание воспроизведения без wake-word")
+                        self._stop_all_audio()
+                        # Короткое голосовое подтверждение
+                        try:
+                            self.speak("Остановлено.")
+                        finally:
+                            self._unduck_audio()
+                        continue
 
                 # Final: команда распознана целиком.
                 # Защита от эха: если в реплике нет имени ассистента, а слова

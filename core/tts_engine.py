@@ -181,6 +181,12 @@ class TTSEngine:
                 except Exception:
                     pass
 
+    def is_playing(self) -> bool:
+        """True, если в данный момент aplay проигрывает TTS-фразу."""
+        with self._proc_lock:
+            proc = self._current_proc
+        return proc is not None and proc.poll() is None
+
     # ------------------------------------------------------------------
     # Файловый кэш синтезированных фраз
     # ------------------------------------------------------------------

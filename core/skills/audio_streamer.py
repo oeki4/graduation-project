@@ -64,6 +64,14 @@ class AudioStreamer:
     # Публичный интерфейс
     # ------------------------------------------------------------------
 
+    def is_active(self) -> bool:
+        """True, если сейчас идёт воспроизведение (радио/сказка)."""
+        if self._playback_thread is not None and self._playback_thread.is_alive():
+            return True
+        if self._current_playback_process is not None:
+            return self._current_playback_process.poll() is None
+        return False
+
     def play_url(self, url: str) -> bool:
         """Воспроизводит аудиофайл по URL (двухфазный буфер — для сказок)."""
         self.stop()
