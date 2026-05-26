@@ -100,7 +100,15 @@ def _module_horoscope(parsed_data, assistant):
     sentences = [intro] + _split_sentences(horoscope_text)
     logger.detail(f"предложений для озвучки: {len(sentences)}")
 
-    _play_pipelined(sentences, assistant)
+    # Запускаем пайплайн в ФОНОВОМ потоке — иначе главный поток в start()
+    # будет заблокирован на ~20+ секунд воспроизведения, и Vosk не сможет
+    # сообщить о новых командах (включая «стой»). Радио и сказки уже
+    # работают в фоне — приводим гороскоп к той же модели.
+    threading.Thread(
+        target=_play_pipelined,
+        args=(sentences, assistant),
+        daemon=True,
+    ).start()
 
 
 # ------------------------------------------------------------------
