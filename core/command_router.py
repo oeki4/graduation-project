@@ -11,6 +11,9 @@ class CommandRouter:
         Роутер команд с динамической загрузкой навыков (плагинов).
         """
         self.routes = {}
+        # Сохраняем ссылки на загруженные модули — нужны для post-init
+        # хука, который вызывается, когда ассистент полностью готов.
+        self._loaded_modules = {}
         self.load_skills()
         
     def register_route(self, intent, handler):
@@ -43,6 +46,7 @@ class CommandRouter:
                     module = importlib.util.module_from_spec(spec)
                     try:
                         spec.loader.exec_module(module)
+                        self._loaded_modules[module_name] = module
                         # Ищем функцию setup и вызываем её, передавая роутер
                         if hasattr(module, 'setup') and callable(module.setup):
                             module.setup(self)
@@ -50,6 +54,20 @@ class CommandRouter:
                             print(f"⚠️ В модуле {module_name} нет функции setup(router).")
                     except Exception as e:
                         print(f"❌ Ошибка при загрузке навыка {module_name}: {e}")
+
+    def notify_assistant_ready(self, assistant):
+        """
+        Уведомляет навыки, что ассистент полностью инициализирован.
+        Если у навыка есть функция on_assistant_ready(assistant), она будет
+        вызвана. Используется навыками, которым нужно восстановить состояние
+        (напоминания, отложенные задачи и т. п.) после перезапуска программы.
+        """
+        for name, module in self._loaded_modules.items():
+            if hasattr(module, "on_assistant_ready") and callable(module.on_assistant_ready):
+                try:
+                    module.on_assistant_ready(assistant)
+                except Exception as e:
+                    logger.warn(f"on_assistant_ready упал в навыке {name}: {e}")
 
     def route_command(self, parsed_data, assistant_instance):
         """

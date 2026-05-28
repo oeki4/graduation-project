@@ -21,8 +21,10 @@
 import os
 import re
 import sys
+import json
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import logger
@@ -33,6 +35,9 @@ import logger
 # Каждое напоминание: {"timer": Timer, "text": str, "fire_at": datetime}
 _active_reminders: list[dict] = []
 _lock = threading.Lock()
+
+# Файл персистентности: напоминания переживают перезапуск программы.
+_STATE_FILE = (Path(__file__).parent / ".." / "data" / "reminders.json").resolve()
 
 
 # ------------------------------------------------------------------
@@ -318,6 +323,7 @@ def _start_reminder(seconds: int, reminder_text: str, assistant):
         with _lock:
             if rec in _active_reminders:
                 _active_reminders.remove(rec)
+        _save_state()  # удалить отработавшее из JSON
         logger.system("НАПОМИНАНИЕ", f"⏰ сработало: «{reminder_text}»")
 
         # Останавливаем фоновое аудио, чтобы уведомление было слышно
@@ -348,6 +354,7 @@ def _start_reminder(seconds: int, reminder_text: str, assistant):
 
     with _lock:
         _active_reminders.append(rec)
+    _save_state()  # сохранить новое в JSON
 
     duration_spoken = _format_duration_spoken(seconds)
     logger.detail(f"длительность: {seconds} сек ({duration_spoken})")
@@ -378,6 +385,8 @@ def _cancel_all_reminders(assistant):
             rec["timer"].cancel()
         except Exception:
             pass
+
+    _save_state()  # сбросить файл, раз отменили все
 
     count = len(active)
     word = _form_reminder(count)
@@ -494,3 +503,124 @@ def _form_reminder(n: int) -> str:
     if 2 <= last <= 4:
         return "напоминания"
     return "напоминаний"
+
+
+# ------------------------------------------------------------------
+# Персистентность: сохранение и восстановление между запусками
+# ------------------------------------------------------------------
+
+def _save_state():
+    """
+    Сохраняет список активных напоминаний в JSON-файл.
+    Хранит только text и fire_at — timer-объекты не сериализуются.
+    """
+    with _lock:
+        data = [
+            {"text": rec["text"], "fire_at": rec["fire_at"].isoformat()}
+            for rec in _active_reminders
+        ]
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        # Атомарная замена — никаких полузаписанных файлов после краша
+        tmp.replace(_STATE_FILE)
+    except Exception as e:
+        logger.warn(f"Не удалось сохранить напоминания: {e}")
+
+
+def _load_state() -> list[dict]:
+    """Загружает список напоминаний из JSON-файла."""
+    if not _STATE_FILE.exists():
+        return []
+    try:
+        with open(_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warn(f"Не удалось прочитать файл напоминаний: {e}")
+        return []
+
+
+def on_assistant_ready(assistant):
+    """
+    Вызывается router'ом, когда ассистент полностью инициализирован.
+    Восстанавливает все непросроченные напоминания из JSON-файла.
+    """
+    state = _load_state()
+    if not state:
+        return
+
+    now = datetime.now()
+    restored = 0
+    missed = 0
+
+    for item in state:
+        try:
+            fire_at = datetime.fromisoformat(item["fire_at"])
+            text = item.get("text", "")
+        except Exception:
+            continue
+
+        remaining = (fire_at - now).total_seconds()
+        if remaining <= 0:
+            # Напоминание просрочено, пока программа не работала
+            missed += 1
+            continue
+
+        # Восстанавливаем threading.Timer на оставшееся время
+        _restore_reminder(int(remaining), text, fire_at, assistant)
+        restored += 1
+
+    logger.system("НАПОМИНАНИЕ",
+                  f"восстановлено {restored} из {len(state)}, пропущено {missed}")
+
+    # Сохраняем актуальное состояние (без просроченных)
+    _save_state()
+
+    # Если что-то пропустили — оповещаем голосом
+    if missed > 0:
+        word = _form_reminder(missed)
+        assistant.speak(
+            f"Пока меня не было, пропущено {_number_to_words(missed)} {word}."
+        )
+
+
+def _restore_reminder(seconds: int, reminder_text: str,
+                      fire_at: datetime, assistant):
+    """Восстанавливает напоминание без голосового подтверждения постановки."""
+    rec: dict = {"timer": None, "text": reminder_text, "fire_at": fire_at}
+
+    def _on_fire():
+        with _lock:
+            if rec in _active_reminders:
+                _active_reminders.remove(rec)
+        _save_state()
+        logger.system("НАПОМИНАНИЕ", f"⏰ сработало (восстановл.): «{reminder_text}»")
+
+        try:
+            assistant.streamer.stop()
+        except Exception:
+            pass
+
+        sound = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "assets", "timer.mp3",
+        )
+        try:
+            assistant._play_sound(sound)
+        except Exception:
+            pass
+
+        if reminder_text:
+            assistant.speak(f"Напоминание: {reminder_text}.")
+        else:
+            assistant.speak("Напоминание сработало.")
+
+    t = threading.Timer(seconds, _on_fire)
+    t.daemon = True
+    t.start()
+    rec["timer"] = t
+
+    with _lock:
+        _active_reminders.append(rec)

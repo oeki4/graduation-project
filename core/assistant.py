@@ -149,6 +149,10 @@ class VoiceAssistant:
             # Единый стример для всего ассистента — навыки используют его,
             # а при новой команде он автоматически останавливается.
             self.streamer = AudioStreamer(self)
+            # Уведомляем навыки, что ассистент готов — даём шанс
+            # восстановить состояние (например, активные напоминания
+            # из reminder.py загрузить из JSON-файла).
+            self.router.notify_assistant_ready(self)
         except FileNotFoundError as e:
             print(f"❌ Критическая ошибка: {e}")
             sys.exit(1)
