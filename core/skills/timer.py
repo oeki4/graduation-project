@@ -175,10 +175,23 @@ def _start_timer(seconds: int, assistant):
             if timer in _active_timers:
                 _active_timers.remove(timer)
         logger.system("ТАЙМЕР", f"⏰ сработал! ({seconds} сек)")
+        # Останавливаем фоновое аудио (радио/сказку), чтобы уведомление
+        # было хорошо слышно
         try:
             assistant.streamer.stop()
         except Exception:
             pass
+        # Сначала проигрываем характерный звук таймера (мелодия будильника),
+        # затем озвучиваем голосом — пользователь слышит звон даже если
+        # сейчас не у ассистента
+        timer_sound = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "assets", "timer.mp3",
+        )
+        try:
+            assistant._play_sound(timer_sound)
+        except Exception as e:
+            logger.warn(f"Не удалось проиграть звук таймера: {e}")
         assistant.speak("Время вышло. Таймер сработал.")
 
     timer = threading.Timer(seconds, _on_fire)
