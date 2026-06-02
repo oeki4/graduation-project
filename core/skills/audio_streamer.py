@@ -429,10 +429,21 @@ class AudioStreamer:
     # ------------------------------------------------------------------
 
     def _play_linux(self, url: str) -> bool:
+        # Берём текущую программную громкость ассистента (0.0–1.0), чтобы
+        # сказки/радио звучали на том же уровне, что и TTS. Без этого cvlc
+        # играл на 100% системной громкости, а TTS — приглушённый через
+        # _software_volume, отсюда разница в громкости.
+        volume = 1.0
+        if self.assistant is not None:
+            volume = getattr(self.assistant, "_software_volume", 1.0)
+        volume = max(0.0, min(1.0, volume))
+
         try:
-            print("🚀 [STREAMER] Стриминг через CVLC (Linux/Pi)...")
+            print(f"🚀 [STREAMER] Стриминг через CVLC (Linux/Pi), громкость {int(volume*100)}%...")
+            # cvlc --gain: множитель усиления, 1.0 = нормальный уровень.
             self._current_playback_process = subprocess.Popen(
-                ["cvlc", "--play-and-exit", "--quiet", url],
+                ["cvlc", "--play-and-exit", "--quiet",
+                 "--gain", f"{volume:.2f}", url],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -441,8 +452,10 @@ class AudioStreamer:
             print("⚠️ [STREAMER] cvlc не найден, пробую ffplay...")
 
         try:
+            # ffplay -volume: целое 0–100.
             self._current_playback_process = subprocess.Popen(
-                ["ffplay", "-nodisp", "-autoexit", url],
+                ["ffplay", "-nodisp", "-autoexit",
+                 "-volume", str(int(volume * 100)), url],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
