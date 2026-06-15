@@ -186,9 +186,25 @@ def _degrees_form(n: int) -> str:
 
 
 # ------------------------------------------------------------------
-# Open-Meteo API — бесплатный, без ключа, работает из России
+# Источники погоды
+# ------------------------------------------------------------------
+# Основной: OpenWeatherMap (надёжный, работает из РФ, описание на русском).
+#   Требует бесплатный API-ключ. Задаётся через переменную окружения
+#   OWM_API_KEY или прямо в _OWM_API_KEY ниже.
+# Резервный: Open-Meteo (бесплатный, без ключа) — если OWM не настроен
+#   или недоступен.
 # ------------------------------------------------------------------
 
+# Ключ OpenWeatherMap. Получить бесплатно: https://openweathermap.org/api
+# Рекомендуется задавать через переменную окружения, а не хранить в коде:
+#   export OWM_API_KEY="ваш_ключ"   (Linux)
+#   $env:OWM_API_KEY="ваш_ключ"     (Windows PowerShell)
+_OWM_API_KEY = os.environ.get("OWM_API_KEY", "")
+
+_OWM_CURRENT_URL  = "https://api.openweathermap.org/data/2.5/weather"
+_OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"
+
+# Резервный Open-Meteo
 # Геокодинг: имя города → координаты
 _GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 # Прогноз: координаты → погода
@@ -254,21 +270,79 @@ def _get_json(url: str, params: dict, attempts: int = 3, timeout: int = 8):
 def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
     """
     Возвращает описание погоды для города на русском, удобное для TTS.
-    Использует Open-Meteo: бесплатный API без ключа, доступен из России.
 
-    1. Геокодинг: имя города → координаты (lat, lon)
-    2. Прогноз: GET /v1/forecast?latitude=...&longitude=...&...
-    3. Из ответа достаём температуру и WMO weather code → описание
+    Цепочка источников:
+      1. OpenWeatherMap (если задан ключ) — основной, надёжный.
+      2. Open-Meteo — резервный, бесключевой.
+      3. wttr.in — последний фолбэк (только текущая погода).
 
     Возвращает строку вида «плюс 11 градусов, облачно».
     """
     day_offset, hour = _TIME_MAP.get(time_key, (0, None))
 
-    # Open-Meteo бесплатно отдаёт прогноз на 7 дней вперёд, но не прошлое
     if day_offset < 0:
-        print("⚠️  [ПОГОДА] Open-Meteo не предоставляет данные за прошлое.")
+        print("⚠️  [ПОГОДА] Данные о погоде в прошлом недоступны.")
         return "к сожалению, данные о погоде в прошлом недоступны"
 
+    # ── Основной источник: OpenWeatherMap ─────────────────────────
+    if _OWM_API_KEY:
+        result = _fetch_weather_owm(city, day_offset, hour)
+        if result:
+            return result
+        print("⚠️  [ПОГОДА] OpenWeatherMap не ответил — перехожу на Open-Meteo.")
+    else:
+        print("ℹ️  [ПОГОДА] Ключ OWM_API_KEY не задан — использую Open-Meteo.")
+
+    # ── Резервный источник: Open-Meteo ────────────────────────────
+    return _fetch_weather_open_meteo(city, day_offset, hour)
+
+
+def _fetch_weather_owm(city: str, day_offset: int, hour) -> str | None:
+    """
+    Основной источник — OpenWeatherMap.
+
+    Для текущей погоды используется endpoint /weather, для прогноза на
+    завтра/послезавтра — /forecast (даёт точки с шагом 3 часа на 5 дней).
+    OWM сразу отдаёт описание погоды на русском (lang=ru), поэтому
+    словарь WMO-кодов здесь не нужен.
+    """
+    try:
+        if day_offset == 0 and hour is None:
+            # Текущая погода
+            data = _get_json(_OWM_CURRENT_URL, {
+                "q": city, "appid": _OWM_API_KEY,
+                "units": "metric", "lang": "ru",
+            })
+            temp = data["main"]["temp"]
+            desc = data["weather"][0]["description"]
+        else:
+            # Прогноз: список 3-часовых точек на 5 дней
+            data = _get_json(_OWM_FORECAST_URL, {
+                "q": city, "appid": _OWM_API_KEY,
+                "units": "metric", "lang": "ru",
+            })
+            entries = data.get("list", [])
+            if not entries:
+                return None
+            # Подбираем точку, ближайшую к нужному дню и часу.
+            # Точки идут с шагом 3 часа; индекс ≈ день*8 + час/3.
+            target_hour = 12 if hour is None else hour
+            idx = day_offset * 8 + target_hour // 3
+            idx = max(0, min(len(entries) - 1, idx))
+            entry = entries[idx]
+            temp = entry["main"]["temp"]
+            desc = entry["weather"][0]["description"]
+
+        temp = int(round(temp))
+        return _format_weather(temp, desc)
+
+    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+        print(f"❌ [ПОГОДА] OpenWeatherMap: {e}")
+        return None
+
+
+def _fetch_weather_open_meteo(city: str, day_offset: int, hour) -> str | None:
+    """Резервный источник погоды — Open-Meteo (без ключа)."""
     # ── 1. Геокодинг (с ретраями) ─────────────────────────────────
     try:
         geo_data = _get_json(
@@ -332,10 +406,20 @@ def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
         print(f"❌ [ПОГОДА] Не удалось разобрать ответ: {e}")
         return None
 
-    # ── 4. Преобразуем в форму, удобную для TTS ──────────────────
-    # «+11, code=3» → «плюс одиннадцать градусов, пасмурно»
-    # «+1, code=0»  → «плюс один градус, ясно»
-    # «-22, code=73» → «минус двадцать два градуса, снег»
+    return _format_weather(temp, desc)
+
+
+# ------------------------------------------------------------------
+# Форматирование температуры и описания для TTS
+# ------------------------------------------------------------------
+
+def _format_weather(temp: int, desc: str) -> str:
+    """
+    Собирает озвучиваемую фразу из температуры и описания.
+      (+11, «пасмурно») → «плюс одиннадцать градусов, пасмурно»
+      (+1,  «ясно»)     → «плюс один градус, ясно»
+      (-22, «снег»)     → «минус двадцать два градуса, снег»
+    """
     temp_words = _number_to_words(temp)
     degrees = _degrees_form(temp)
 
@@ -346,7 +430,8 @@ def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
     else:
         temp_spoken = "ноль градусов"
 
-    return f"{temp_spoken}, {desc}"
+    desc = (desc or "").strip().lower()
+    return f"{temp_spoken}, {desc}" if desc else temp_spoken
 
 
 # ------------------------------------------------------------------
