@@ -228,6 +228,29 @@ _WMO_CODES = {
 }
 
 
+def _get_json(url: str, params: dict, attempts: int = 3, timeout: int = 8):
+    """
+    GET-запрос с несколькими попытками. Сетевые таймауты к Open-Meteo
+    бывают перемежающимися (особенно на медленных каналах и при работе
+    через Wi-Fi на Pi), поэтому одна неудача — не повод сдаваться.
+    Возвращает разобранный JSON или пробрасывает последнее исключение.
+    """
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(
+                url, params=params, timeout=timeout,
+                headers={"User-Agent": "VoiceAssistant/1.0"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
+            last_exc = e
+            if attempt < attempts:
+                print(f"⚠️  [ПОГОДА] Попытка {attempt}/{attempts} не удалась: {e}")
+    raise last_exc
+
+
 def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
     """
     Возвращает описание погоды для города на русском, удобное для TTS.
@@ -246,16 +269,12 @@ def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
         print("⚠️  [ПОГОДА] Open-Meteo не предоставляет данные за прошлое.")
         return "к сожалению, данные о погоде в прошлом недоступны"
 
-    # ── 1. Геокодинг ──────────────────────────────────────────────
+    # ── 1. Геокодинг (с ретраями) ─────────────────────────────────
     try:
-        geo_resp = requests.get(
+        geo_data = _get_json(
             _GEOCODE_URL,
-            params={"name": city, "count": 1, "language": "ru", "format": "json"},
-            timeout=6,
-            headers={"User-Agent": "VoiceAssistant/1.0"},
+            {"name": city, "count": 1, "language": "ru", "format": "json"},
         )
-        geo_resp.raise_for_status()
-        geo_data = geo_resp.json()
         results = geo_data.get("results")
         if not results:
             print(f"⚠️  [ПОГОДА] Город «{city}» не найден.")
@@ -267,25 +286,26 @@ def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
         print(f"❌ [ПОГОДА] Ошибка геокодинга: {e}")
         return None
 
-    # ── 2. Прогноз ────────────────────────────────────────────────
+    # ── 2. Прогноз (с ретраями) ───────────────────────────────────
     try:
-        params = {
-            "latitude":  lat,
-            "longitude": lon,
-            "timezone":  timezone,
-            "current":   "temperature_2m,weather_code",
-            "hourly":    "temperature_2m,weather_code",
-            "forecast_days": 3,
-        }
-        fc_resp = requests.get(
-            _FORECAST_URL, params=params, timeout=6,
-            headers={"User-Agent": "VoiceAssistant/1.0"},
+        fc_data = _get_json(
+            _FORECAST_URL,
+            {
+                "latitude":  lat,
+                "longitude": lon,
+                "timezone":  timezone,
+                "current":   "temperature_2m,weather_code",
+                "hourly":    "temperature_2m,weather_code",
+                "forecast_days": 3,
+            },
         )
-        fc_resp.raise_for_status()
-        fc_data = fc_resp.json()
     except (requests.RequestException, ValueError) as e:
         print(f"❌ [ПОГОДА] Ошибка прогноза: {e}")
-        return None
+        # Резервный источник — wttr.in (иногда доступен, когда Open-Meteo нет)
+        fallback = _fetch_weather_wttr(city)
+        if fallback:
+            print("✅ [ПОГОДА] Получено через резервный источник wttr.in")
+        return fallback
 
     # ── 3. Выбираем точку прогноза согласно time_key ──────────────
     try:
@@ -327,3 +347,55 @@ def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
         temp_spoken = "ноль градусов"
 
     return f"{temp_spoken}, {desc}"
+
+
+# ------------------------------------------------------------------
+# Резервный источник: wttr.in (только текущая погода)
+# ------------------------------------------------------------------
+
+def _fetch_weather_wttr(city: str) -> str | None:
+    """
+    Запасной источник погоды на случай, если Open-Meteo недоступен.
+    wttr.in отдаёт текущую погоду в компактном формате. Прогноз на
+    будущие дни здесь не поддерживается — возвращаем только «сейчас».
+
+    Формат j1 даёт JSON с current_condition: температура и код погоды.
+    """
+    try:
+        data = _get_json(f"https://wttr.in/{city}", {"format": "j1"},
+                         attempts=2, timeout=7)
+        current = data.get("current_condition", [{}])[0]
+        temp_str = current.get("temp_C")
+        if temp_str is None:
+            return None
+        temp = int(round(float(temp_str)))
+
+        # wttr.in отдаёт код погоды в weatherCode (WWO, не WMO) —
+        # его описание есть прямо в ответе на русском при lang=ru,
+        # но в j1 без lang оно на английском. Берём температуру и
+        # обобщённое описание по облачности.
+        desc = ""
+        cloud = current.get("cloudcover")
+        if cloud is not None:
+            c = int(cloud)
+            if c < 25:
+                desc = "ясно"
+            elif c < 60:
+                desc = "переменная облачность"
+            else:
+                desc = "облачно"
+
+        temp_words = _number_to_words(temp)
+        degrees = _degrees_form(temp)
+        if temp > 0:
+            temp_spoken = f"плюс {temp_words} {degrees}"
+        elif temp < 0:
+            temp_spoken = f"минус {temp_words} {degrees}"
+        else:
+            temp_spoken = "ноль градусов"
+
+        return f"{temp_spoken}, {desc}" if desc else temp_spoken
+
+    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+        print(f"❌ [ПОГОДА] Резервный источник wttr.in тоже недоступен: {e}")
+        return None
