@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import queue
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
@@ -36,18 +37,28 @@ class SpeechRecognizer:
         Генератор, который слушает микрофон в реальном времени.
         Возвращает словари с типом результата ('final' или 'partial') и самим текстом.
         """
+        # Накапливаем чистое процессорное время декодирования Vosk за одну
+        # фразу — от первого аудиоблока до финального результата. Это честная
+        # метрика «как быстро модель переводит звук в текст».
+        decode_ms = 0.0
+
         with sd.RawInputStream(samplerate=self.samplerate, blocksize=8000,
                                device=self.device, dtype='int16',
                                channels=1, callback=self._audio_callback):
             while True:
                 data = self.q.get()
 
-                if self.recognizer.AcceptWaveform(data):
+                t0 = time.perf_counter()
+                is_final = self.recognizer.AcceptWaveform(data)
+                decode_ms += (time.perf_counter() - t0) * 1000
+
+                if is_final:
                     # Получаем итоговый результат (когда человек сделал паузу)
                     result_json = json.loads(self.recognizer.Result())
                     text = result_json.get("text", "")
-                    if text: # Возвращаем только если текст не пустой
-                        yield {"type": "final", "text": text}
+                    if text:  # Возвращаем только если текст не пустой
+                        yield {"type": "final", "text": text, "stt_ms": decode_ms}
+                    decode_ms = 0.0  # сброс для следующей фразы
                 else:
                     # Получаем промежуточный результат (во время речи)
                     if yield_partial:

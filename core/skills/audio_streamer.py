@@ -7,6 +7,12 @@ import requests
 import numpy as np
 import sounddevice as sd
 
+
+def _dbg(msg: str):
+    """Отладочное сообщение стримера — печатается только под STREAMER_DEBUG."""
+    if os.environ.get("STREAMER_DEBUG"):
+        print(f"   [STREAMER] {msg}")
+
 # miniaudio используется для декодирования MP3 без внешних программ
 try:
     import miniaudio
@@ -75,7 +81,7 @@ class AudioStreamer:
     def play_url(self, url: str) -> bool:
         """Воспроизводит аудиофайл по URL (двухфазный буфер — для сказок)."""
         self.stop()
-        print(f"🎵 [STREAMER] Запуск воспроизведения файла: {url}")
+        _dbg(f"запуск воспроизведения файла: {url}")
 
         if os.name == 'nt':
             return self._play_windows(url)
@@ -93,7 +99,7 @@ class AudioStreamer:
             print("❌ [STREAMER] miniaudio не установлен: pip install miniaudio")
             return False
 
-        print(f"📻 [STREAMER] Запуск радио стриминга: {url}")
+        _dbg(f"запуск радио стриминга: {url}")
         self._stop_event = threading.Event()
         self._playback_thread = threading.Thread(
             target=self._stream_radio,
@@ -107,7 +113,7 @@ class AudioStreamer:
         """Останавливает текущее воспроизведение."""
         # Останавливаем Windows-поток
         if self._playback_thread and self._playback_thread.is_alive():
-            print("🛑 [STREAMER] Остановка Python-плеера...")
+            _dbg("остановка Python-плеера")
             self._stop_event.set()
             self._playback_thread.join(timeout=3)
             sd.stop()
@@ -115,13 +121,13 @@ class AudioStreamer:
         # Останавливаем Linux-процесс
         if self._current_playback_process:
             try:
-                print("🛑 [STREAMER] Остановка системного плеера...")
+                _dbg("остановка системного плеера")
                 self._current_playback_process.terminate()
                 self._current_playback_process.wait(timeout=2)
             except Exception:
                 if self._current_playback_process:
                     self._current_playback_process.kill()
-                print("⚠️ [STREAMER] Процесс плеера завершён принудительно.")
+                _dbg("процесс плеера завершён принудительно")
             finally:
                 self._current_playback_process = None
 
@@ -184,13 +190,13 @@ class AudioStreamer:
                         samplerate=rate, channels=channels, dtype='int16'
                     )
                     out_stream.start()
-                    print(f"▶️  [STREAMER] Радио: {rate} Гц, {channels} кан. — играю")
+                    _dbg(f"радио: {rate} Гц, {channels} кан. — играю")
 
                 # Применяем программную громкость и отправляем PCM в sounddevice
                 out_stream.write(self._apply_volume(audio))
                 accumulator.clear()
 
-            print("✅ [STREAMER] Радио: поток завершён.")
+            _dbg("радио: поток завершён")
 
         except requests.RequestException as e:
             print(f"❌ [STREAMER] Ошибка подключения к радио: {e}")
@@ -254,11 +260,11 @@ class AudioStreamer:
                         buffer.write(chunk)
                         total += len(chunk)
                         if total % (256 * 1024) < 65_536:
-                            print(f"⬇️  [STREAMER] Загружено: {total // 1024} КБ")
+                            _dbg(f"загружено: {total // 1024} КБ")
                         # Сигналим, как только накоплен начальный буфер
                         if not prebuf_ready.is_set() and total >= _PREBUFFER_BYTES:
                             prebuf_ready.set()
-                    print(f"✅ [STREAMER] Загрузка завершена: {total // 1024} КБ")
+                    _dbg(f"загрузка завершена: {total // 1024} КБ")
                 finally:
                     dl_done.set()
                     prebuf_ready.set()  # на случай, если файл меньше _PREBUFFER_BYTES
@@ -267,7 +273,7 @@ class AudioStreamer:
             dl_thread.start()
 
             # ── ждём начального буфера ────────────────────────────────
-            print(f"⏳ [STREAMER] Буферизация ({_PREBUFFER_BYTES // 1024} КБ)...")
+            _dbg(f"буферизация ({_PREBUFFER_BYTES // 1024} КБ)")
             if not prebuf_ready.wait(timeout=30) or stop_event.is_set():
                 stop_event.set()
                 return
@@ -287,17 +293,17 @@ class AudioStreamer:
                 if dl_done.is_set():
                     # Файл скачан полностью, но декод всё равно не идёт — конец
                     break
-                print(f"⏳ [STREAMER] Декод не удался, жду ещё данные (попытка {attempt + 1})...")
+                _dbg(f"декод не удался, жду данные (попытка {attempt + 1})")
                 threading.Event().wait(0.5)
 
             if phase1_audio is None:
-                print("❌ [STREAMER] Не удалось декодировать MP3. Останавливаю загрузку.")
+                _dbg("не удалось декодировать MP3, останавливаю загрузку")
                 stop_event.set()
                 return
 
             duration1 = len(phase1_audio) / rate
-            print(f"▶️  [STREAMER] Фаза 1: воспроизведение "
-                  f"{duration1:.1f} сек ({len(phase1_bytes) // 1024} КБ)")
+            _dbg(f"фаза 1: воспроизведение {duration1:.1f} сек "
+                 f"({len(phase1_bytes) // 1024} КБ)")
 
             frames_played = self._play_audio(phase1_audio, channels, rate, stop_event)
 
@@ -307,7 +313,7 @@ class AudioStreamer:
             # ── ФАЗА 2: играем оставшуюся часть файла ────────────────
             # Ждём окончания загрузки (обычно уже завершена к этому моменту)
             if not dl_done.is_set():
-                print("⏳ [STREAMER] Ожидание окончания загрузки...")
+                _dbg("ожидание окончания загрузки")
                 dl_done.wait()
 
             if stop_event.is_set():
@@ -318,7 +324,7 @@ class AudioStreamer:
 
             # Если файл не изменился (всё уже было в фазе 1) — выходим
             if len(full_bytes) <= len(phase1_bytes):
-                print("✅ [STREAMER] Воспроизведение завершено.")
+                _dbg("воспроизведение завершено")
                 return
 
             full_audio, _, _ = self._decode_mp3(full_bytes)
@@ -328,20 +334,19 @@ class AudioStreamer:
             # Пропускаем уже проигранные фреймы
             remaining = full_audio[frames_played:]
             if len(remaining) == 0:
-                print("✅ [STREAMER] Воспроизведение завершено.")
+                _dbg("воспроизведение завершено")
                 return
 
             duration2 = len(remaining) / rate
-            print(f"▶️  [STREAMER] Фаза 2: продолжение "
-                  f"({duration2:.1f} сек оставшегося аудио)")
+            _dbg(f"фаза 2: продолжение ({duration2:.1f} сек)")
 
             self._play_audio(remaining, channels, rate, stop_event)
-            print("✅ [STREAMER] Воспроизведение завершено.")
+            _dbg("воспроизведение завершено")
 
         except requests.RequestException as e:
-            print(f"❌ [STREAMER] Ошибка загрузки: {e}")
+            _dbg(f"ошибка загрузки: {e}")
         except Exception as e:
-            print(f"❌ [STREAMER] Неожиданная ошибка: {e}")
+            _dbg(f"неожиданная ошибка: {e}")
 
     # ------------------------------------------------------------------
     # Вспомогательные методы
@@ -366,7 +371,7 @@ class AudioStreamer:
                 audio = audio.reshape(-1, channels)
             return audio, channels, rate
         except miniaudio.DecodeError as e:
-            print(f"❌ [STREAMER] Ошибка декодирования MP3: {e}")
+            _dbg(f"ошибка декодирования MP3: {e}")
             return None, None, None
 
     def _play_audio(self, audio: np.ndarray, channels: int,
@@ -439,7 +444,7 @@ class AudioStreamer:
         volume = max(0.0, min(1.0, volume))
 
         try:
-            print(f"🚀 [STREAMER] Стриминг через CVLC (Linux/Pi), громкость {int(volume*100)}%...")
+            _dbg(f"стриминг через cvlc, громкость {int(volume*100)}%")
             # cvlc --gain: множитель усиления, 1.0 = нормальный уровень.
             self._current_playback_process = subprocess.Popen(
                 ["cvlc", "--play-and-exit", "--quiet",
@@ -449,7 +454,7 @@ class AudioStreamer:
             )
             return True
         except FileNotFoundError:
-            print("⚠️ [STREAMER] cvlc не найден, пробую ffplay...")
+            _dbg("cvlc не найден, пробую ffplay")
 
         try:
             # ffplay -volume: целое 0–100.

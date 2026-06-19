@@ -103,6 +103,11 @@ class VoiceAssistant:
         # один и тот же partial много раз подряд.
         self._last_partial = ""
 
+        # Состояние конвейера для слайд-логирования таймингов.
+        self._in_pipeline = False        # идёт ли сейчас обработка команды
+        self._last_stt_ms = 0.0          # время распознавания последней фразы
+        self._last_spoken = ""           # последний произнесённый ответ
+
         logger.heavy_line()
         print(f"⚙️  {logger.C.BOLD}Инициализация систем...{logger.C.RESET}")
         logger.heavy_line()
@@ -182,19 +187,25 @@ class VoiceAssistant:
         Используйте этот метод вместо self.tts.speak() везде, где
         нужна защита (в навыках: assistant.speak(...)).
         """
-        logger.step("🔊", "TTS", f"«{text}»")
+        import time
         self._is_speaking = True
+        self._last_spoken = text
         # Запоминаем фразу для защиты от эха в start()
         self._recent_tts_phrases.append(text.lower())
+        t0 = time.perf_counter()
         try:
             # На Linux передаём программную громкость в TTS, чтобы он
             # масштабировал PCM перед aplay. На Windows громкость
             # регулируется системно (pycaw), TTS гонит сэмплы как есть.
             volume = self._software_volume if os.name == "posix" else 1.0
-            with logger.Timer("синтез + воспроизведение"):
-                self.tts.speak(text, volume=volume)
+            self.tts.speak(text, volume=volume)
         finally:
             self._is_speaking = False
+        # Метрику синтеза печатаем только внутри конвейера обработки
+        # команды (для слайда). Приветствие/системные ответы — без шума.
+        if self._in_pipeline:
+            ms = (time.perf_counter() - t0) * 1000
+            logger.metric("🔊", "Silero (синтез + речь)", ms)
 
     def _stop_all_audio(self):
         """
@@ -302,11 +313,11 @@ class VoiceAssistant:
                 if not self.is_running:
                     break
                 if user_input.strip():
-                    print(f"\n👤 {logger.C.BOLD}Ввод (консоль):{logger.C.RESET} {user_input}")
                     text = user_input.lower()
                     if self.name in text:
-                        logger.step("✂️ ", "Wake-word удалён", f"«{self.name}»")
                         text = text.replace(self.name, "").strip()
+                    # Консольный ввод — без распознавания речи
+                    self._last_stt_ms = 0.0
                     try:
                         self._process(text)
                     finally:
@@ -400,18 +411,18 @@ class VoiceAssistant:
                 # Защита от эха: если в реплике нет имени ассистента, а слова
                 # сильно совпадают с недавно произнесённым TTS — пропускаем.
                 if self._is_tts_echo(text):
-                    logger.detail(f"эхо собственного TTS — игнорирую: «{text}»")
+                    if os.environ.get("VOSK_DEBUG"):
+                        logger.detail(f"эхо TTS — игнорирую: «{text}»")
                     self._unduck_audio()
                     continue
 
-                print(f"\n👤 {logger.C.BOLD}Ввод (голос):{logger.C.RESET} {text}")
                 try:
                     if self.name in text:
-                        logger.step("✂️ ", "Wake-word обнаружен и удалён", f"«{self.name}»")
+                        self._last_stt_ms = result.get("stt_ms", 0.0)
                         clean_text = text.replace(self.name, "").strip()
                         self._process(clean_text)
-                    else:
-                        logger.detail("в реплике нет имени ассистента — игнорирую")
+                    elif os.environ.get("VOSK_DEBUG"):
+                        logger.detail(f"нет имени ассистента — игнорирую: «{text}»")
                 finally:
                     # Возвращаем громкость в любом случае
                     self._unduck_audio()
@@ -509,8 +520,8 @@ class VoiceAssistant:
         self._pre_duck_volume = current
         self._set_volume(self._duck_target_pct)
         self._ducked = True
-        logger.system("AUDIO", f"📉 ducking {current}% → {self._duck_target_pct}% "
-                                f"(услышал имя ассистента)")
+        if os.environ.get("AUDIO_DEBUG"):
+            logger.system("AUDIO", f"📉 ducking {current}% → {self._duck_target_pct}%")
 
         # Сторожевой таймер: если по какой-то причине _unduck_audio()
         # не будет вызван (нет финального распознавания, исключение и т. п.),
@@ -530,7 +541,8 @@ class VoiceAssistant:
 
         if self._pre_duck_volume is not None:
             self._set_volume(self._pre_duck_volume)
-            logger.system("AUDIO", f"📈 unducking → {self._pre_duck_volume}%")
+            if os.environ.get("AUDIO_DEBUG"):
+                logger.system("AUDIO", f"📈 unducking → {self._pre_duck_volume}%")
 
         self._ducked = False
         self._pre_duck_volume = None
@@ -626,107 +638,109 @@ class VoiceAssistant:
         if not text:
             return
 
+        import time
         t = text.lower().strip()
 
-        logger.section(f"ВХОД  «{text}»", emoji="🎤")
+        self._in_pipeline = True
+        self._last_spoken = ""
+        t_start = time.perf_counter()
 
-        # ── 1. Команды, которые НЕ прерывают воспроизведение ──────────
+        logger.section(f"«{text}»", emoji="🎤")
+        # Этап 1 конвейера: распознавание речи (если был голосовой ввод)
+        if self._last_stt_ms > 0:
+            logger.metric("🗣️ ", "Vosk (звук → текст)", self._last_stt_ms)
 
-        if t in ("стоп", "стой", "стопп", "стоп стоп", "остановись",
-                 "остановить", "замолчи", "хватит", "отстань",
-                 "выключи радио", "выключи сказку", "stop"):
-            logger.step("⏹️ ", "Системная команда", "СТОП (прерывает воспроизведение)")
+        try:
+            # ── Системные команды: точные шаблоны, минуют NLU ─────────
+            if t in ("стоп", "стой", "стопп", "стоп стоп", "остановись",
+                     "остановить", "замолчи", "хватит", "отстань",
+                     "выключи радио", "выключи сказку", "stop"):
+                logger.metric("⏹️ ", "Системная команда", note="СТОП")
+                self._stop_all_audio()
+                self._tts_cancel_event.clear()
+                self.speak("Остановлено.")
+                return
+
+            if t in ("громче", "сделай громче", "прибавь громкость",
+                     "прибавь", "погромче"):
+                logger.metric("🔊", "Системная команда", note="ГРОМЧЕ")
+                self._volume_up()
+                self.speak("Громче.")
+                return
+
+            if t in ("тише", "сделай тише", "убавь громкость",
+                     "убавь", "потише"):
+                logger.metric("🔉", "Системная команда", note="ТИШЕ")
+                self._volume_down()
+                self.speak("Тише.")
+                return
+
+            if t.startswith("громкость"):
+                level = self._parse_volume_level(t)
+                if level is not None:
+                    logger.metric("🔊", "Системная команда", note=f"ГРОМКОСТЬ {level}%")
+                    self._set_volume(level)
+                    self.speak(f"Громкость {level} процентов.")
+                else:
+                    self.speak("Не понял уровень громкости. Скажите, например: громкость пятьдесят.")
+                return
+
+            # Стоп-слово среди обрывков эха (играющая сказка/гороскоп)
+            if self.is_audio_playing() and _contains_stop_word(t):
+                logger.metric("⏹️ ", "Системная команда", note="СТОП")
+                self._stop_all_audio()
+                self._tts_cancel_event.clear()
+                self.speak("Остановлено.")
+                return
+
+            # Barge-in: прерываем фон только если что-то реально играет
+            if self.is_audio_playing():
+                logger.metric("✂️ ", "Прерывание фона", note="barge-in")
             self._stop_all_audio()
             self._tts_cancel_event.clear()
-            self.speak("Остановлено.")
-            logger.end_section()
-            return
 
-        if t in ("громче", "сделай громче", "прибавь громкость",
-                 "прибавь", "погромче"):
-            logger.step("🔊", "Системная команда", "ГРОМЧЕ (NLU обойдён)")
-            self._volume_up()
-            self.speak("Громче.")
-            logger.end_section()
-            return
+            # Управление питанием
+            if any(w in t for w in ("перезагрузи", "перезагрузка", "ребут", "reboot")):
+                logger.metric("🔄", "Системная команда", note="ПЕРЕЗАГРУЗКА")
+                self.speak("Перезагружаю систему. Скоро вернусь.")
+                os.system("sudo reboot" if os.name == 'posix' else "shutdown /r /t 0")
+                return
 
-        if t in ("тише", "сделай тише", "убавь громкость",
-                 "убавь", "потише"):
-            logger.step("🔉", "Системная команда", "ТИШЕ (NLU обойдён)")
-            self._volume_down()
-            self.speak("Тише.")
-            logger.end_section()
-            return
+            if any(w in t for w in ("выключи", "выключить", "отключи питание", "power off")):
+                logger.metric("🔴", "Системная команда", note="ВЫКЛЮЧЕНИЕ")
+                self.speak("Выключаю питание. До свидания.")
+                os.system("sudo shutdown -h now" if os.name == 'posix' else "shutdown /s /t 0")
+                return
 
-        if t.startswith("громкость"):
-            level = self._parse_volume_level(t)
-            if level is not None:
-                logger.step("🔊", "Системная команда", f"ГРОМКОСТЬ {level}%")
-                self._set_volume(level)
-                self.speak(f"Громкость {level} процентов.")
-            else:
-                logger.warn("Не удалось распознать уровень громкости")
-                self.speak("Не понял уровень громкости. Скажите, например: громкость пятьдесят.")
-            logger.end_section()
-            return
-
-        # ── 1.5. Стоп среди мусора эха ────────────────────────────────
-        # Если что-то сейчас играет и в реплике есть стоп-слово (где угодно),
-        # трактуем это как команду остановки. Vosk при barge-in часто
-        # склеивает «ассистент стой» с обрывками звучащей сказки/гороскопа
-        # («жили-были старик ... ассистент стоит старик») — в такой длинной
-        # фразе важно лишь наличие стоп-слова, остальное игнорируем.
-        # Без этого ассистент остановит фон, но потом ещё и ответит
-        # «не поняла команду», что раздражает.
-        if self.is_audio_playing() and _contains_stop_word(t):
-            logger.step("⏹️ ", "Стоп (стоп-слово в реплике поверх эха)")
-            self._stop_all_audio()
-            self._tts_cancel_event.clear()
-            self.speak("Остановлено.")
-            logger.end_section()
-            return
-
-        # ── 2. Прерывание текущего воспроизведения (barge-in) ─────────
-        logger.step("✂️ ", "Barge-in: остановка текущего воспроизведения")
-        self._stop_all_audio()
-        # Сбрасываем сигнал отмены — следующий пайплайн начнётся «чистым»
-        self._tts_cancel_event.clear()
-
-        # ── 3. Системные команды управления питанием ──────────────────
-        if any(w in t for w in ("перезагрузи", "перезагрузка", "ребут", "reboot")):
-            logger.step("🔄", "Системная команда", "ПЕРЕЗАГРУЗКА")
-            self.speak("Перезагружаю систему. Скоро вернусь.")
-            os.system("sudo reboot" if os.name == 'posix' else "shutdown /r /t 0")
-            return
-
-        if any(w in t for w in ("выключи", "выключить", "отключи питание", "power off")):
-            logger.step("🔴", "Системная команда", "ВЫКЛЮЧЕНИЕ")
-            self.speak("Выключаю питание. До свидания.")
-            os.system("sudo shutdown -h now" if os.name == 'posix' else "shutdown /s /t 0")
-            return
-
-        # ── 4. NLU — классификация интента через spaCy ────────────────
-        logger.step("🧠", "NLU", "запускаю IntentParser (spaCy textcat)")
-        with logger.Timer("анализ текста"):
+            # ── Этап 2: классификация интента (spaCy) ─────────────────
+            t_nlu = time.perf_counter()
             parsed_data = self.parser.parse(text)
+            nlu_ms = (time.perf_counter() - t_nlu) * 1000
 
-        # Визуализируем результаты классификатора
-        doc = parsed_data.get("spacy_doc")
-        if doc is not None and hasattr(doc, "cats") and doc.cats:
-            logger.detail("вероятности по классам:")
-            logger.intent_bars(doc.cats, predicted=parsed_data["intent"])
+            intent = parsed_data["intent"]
+            doc = parsed_data.get("spacy_doc")
+            conf = 0.0
+            if doc is not None and getattr(doc, "cats", None):
+                conf = doc.cats.get(intent, 0.0) * 100
+            logger.metric("🧠", "spaCy (текст → интент)", nlu_ms,
+                          f"{intent} · {conf:.0f}%")
 
-        # Сущности
-        entities = parsed_data.get("entities", {})
-        if entities:
-            logger.step("🏷️ ", "Сущности", str(entities))
-        else:
-            logger.step("🏷️ ", "Сущности", "(не извлечены)")
+            # Полные шкалы вероятностей — только под NLU_DEBUG
+            if (os.environ.get("NLU_DEBUG") and doc is not None
+                    and getattr(doc, "cats", None)):
+                logger.intent_bars(doc.cats, predicted=intent)
 
-        # ── 5. Маршрутизация в нужный навык ───────────────────────────
-        logger.step("🔀", "Маршрутизация", f"интент → {parsed_data['intent']}")
-        logger.thin_line()
+            # ── Этап 3: извлечённые параметры (сущности) ──────────────
+            entities = parsed_data.get("entities", {})
+            if entities:
+                note = " · ".join(f"{k}={v}" for k, v in entities.items())
+                logger.metric("🏷️ ", "Параметры", note=note)
 
-        self.router.route_command(parsed_data, self)
+            # ── Этап 4: исполнение навыка (печатает свои тайминги) ────
+            self.router.route_command(parsed_data, self)
 
-        logger.end_section()
+        finally:
+            total_ms = self._last_stt_ms + (time.perf_counter() - t_start) * 1000
+            logger.total(total_ms, self._last_spoken)
+            logger.end_section()
+            self._in_pipeline = False

@@ -144,6 +144,41 @@ def intent_bars(scores: dict, predicted: str | None = None, width: int = 24):
         print(f"     {marker}  {name_str}  {bar_color}{bar}{C.RESET}  {pct}")
 
 
+# ── Строка пайплайна с таймингом (для слайда) ─────────────────────
+
+def _fmt_ms(ms: float) -> str:
+    """Форматирует длительность: 284 мс / 1.61 с."""
+    if ms < 1000:
+        return f"{ms:.0f} мс"
+    return f"{ms / 1000:.2f} с"
+
+
+def metric(emoji: str, label: str, ms: float | None = None, note: str = ""):
+    """
+    Одна строка этапа конвейера с выравниванием под слайд:
+
+      🗣️  Vosk (звук → текст)            284 мс   узнать_погоду · 100%
+    """
+    lab = (label + " " * 30)[:30]
+    if ms is None:
+        tcol = " " * 8
+    else:
+        tcol = f"{_fmt_ms(ms):>8}"
+    line = f"  {emoji}  {lab}{C.BOLD}{tcol}{C.RESET}"
+    if note:
+        line += f"   {C.DIM}{note}{C.RESET}"
+    print(line)
+
+
+def total(ms: float, spoken: str = ""):
+    """Итоговая строка: полное время цикла + произнесённый ответ."""
+    thin_line()
+    print(f"  ⏱   {C.BOLD}Полный цикл{C.RESET}            "
+          f"{C.GREEN}{C.BOLD}{_fmt_ms(ms):>8}{C.RESET}")
+    if spoken:
+        print(f"  💬  {C.ITAL}«{spoken}»{C.RESET}")
+
+
 # ── Замер времени операции ────────────────────────────────────────
 
 class Timer:

@@ -1,11 +1,22 @@
 import os
 import sys
 import re
+import time
 import requests
 import pymorphy3
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import logger
+
+# Имя источника, откуда фактически пришёл последний ответ о погоде
+# (для наглядного лога: OpenWeatherMap / Open-Meteo / wttr.in).
+_LAST_SOURCE = ""
+
+
+def _dbg(msg: str):
+    """Отладочное сообщение погоды — печатается только под WEATHER_DEBUG."""
+    if os.environ.get("WEATHER_DEBUG"):
+        print(f"   [ПОГОДА] {msg}")
 
 # Лемматизатор инициализируем один раз — это тяжёлый объект (~50 МБ словарей)
 _morph = pymorphy3.MorphAnalyzer()
@@ -57,27 +68,27 @@ def setup(router):
 def _module_weather(parsed_data, assistant):
     text = parsed_data.get("original_text", "").lower().strip()
 
-    logger.step("🌤️ ", "Навык", "weather.py")
     target_time = _extract_time(text)
     target_city = _extract_city(text)
 
-    logger.detail(f"извлечено время: {target_time}")
-    logger.detail(f"извлечён город: {target_city or '(не указан)'}")
+    # Этап: извлечённые параметры команды
+    logger.metric("🏷️ ", "Параметры", note=f"город: {target_city or '—'} · время: {target_time}")
 
     if not target_city:
         assistant.speak("Не понял, для какого города узнать погоду. Уточните, пожалуйста.")
         return
 
-    logger.step("🌐", "HTTP-запрос к wttr.in", target_city)
-    with logger.Timer("ответ wttr.in"):
-        weather = _fetch_weather(target_city, target_time)
+    # Этап: запрос к погодному API (с замером времени)
+    t0 = time.perf_counter()
+    weather = _fetch_weather(target_city, target_time)
+    http_ms = (time.perf_counter() - t0) * 1000
+    logger.metric("🌐", _LAST_SOURCE or "Погодный API", http_ms,
+                  weather or "нет данных")
 
     if not weather:
-        logger.err("Не удалось получить погоду")
         assistant.speak(f"Не удалось получить погоду для города {target_city}.")
         return
 
-    logger.ok(f"получено: {weather}")
     spoken = f"Погода в городе {target_city} {target_time}: {weather}"
     assistant.speak(spoken)
 
@@ -263,7 +274,7 @@ def _get_json(url: str, params: dict, attempts: int = 3, timeout: int = 8):
         except (requests.RequestException, ValueError) as e:
             last_exc = e
             if attempt < attempts:
-                print(f"⚠️  [ПОГОДА] Попытка {attempt}/{attempts} не удалась: {e}")
+                _dbg(f"попытка {attempt}/{attempts} не удалась: {e}")
     raise last_exc
 
 
@@ -278,23 +289,26 @@ def _fetch_weather(city: str, time_key: str = "сегодня") -> str | None:
 
     Возвращает строку вида «плюс 11 градусов, облачно».
     """
+    global _LAST_SOURCE
     day_offset, hour = _TIME_MAP.get(time_key, (0, None))
 
     if day_offset < 0:
-        print("⚠️  [ПОГОДА] Данные о погоде в прошлом недоступны.")
+        _LAST_SOURCE = "—"
         return "к сожалению, данные о погоде в прошлом недоступны"
 
     # ── Основной источник: OpenWeatherMap ─────────────────────────
     if _OWM_API_KEY:
         result = _fetch_weather_owm(city, day_offset, hour)
         if result:
+            _LAST_SOURCE = "OpenWeatherMap"
             return result
-        print("⚠️  [ПОГОДА] OpenWeatherMap не ответил — перехожу на Open-Meteo.")
-    else:
-        print("ℹ️  [ПОГОДА] Ключ OWM_API_KEY не задан — использую Open-Meteo.")
 
     # ── Резервный источник: Open-Meteo ────────────────────────────
-    return _fetch_weather_open_meteo(city, day_offset, hour)
+    result = _fetch_weather_open_meteo(city, day_offset, hour)
+    if result:
+        # источник проставит сама функция (Open-Meteo или wttr.in)
+        return result
+    return None
 
 
 def _fetch_weather_owm(city: str, day_offset: int, hour) -> str | None:
@@ -337,12 +351,13 @@ def _fetch_weather_owm(city: str, day_offset: int, hour) -> str | None:
         return _format_weather(temp, desc)
 
     except (requests.RequestException, ValueError, KeyError, IndexError) as e:
-        print(f"❌ [ПОГОДА] OpenWeatherMap: {e}")
+        _dbg(f"OpenWeatherMap недоступен: {e}")
         return None
 
 
 def _fetch_weather_open_meteo(city: str, day_offset: int, hour) -> str | None:
     """Резервный источник погоды — Open-Meteo (без ключа)."""
+    global _LAST_SOURCE
     # ── 1. Геокодинг (с ретраями) ─────────────────────────────────
     try:
         geo_data = _get_json(
@@ -351,13 +366,13 @@ def _fetch_weather_open_meteo(city: str, day_offset: int, hour) -> str | None:
         )
         results = geo_data.get("results")
         if not results:
-            print(f"⚠️  [ПОГОДА] Город «{city}» не найден.")
+            _dbg(f"город «{city}» не найден")
             return None
         lat = results[0]["latitude"]
         lon = results[0]["longitude"]
         timezone = results[0].get("timezone", "auto")
     except (requests.RequestException, ValueError, KeyError) as e:
-        print(f"❌ [ПОГОДА] Ошибка геокодинга: {e}")
+        _dbg(f"ошибка геокодинга: {e}")
         return None
 
     # ── 2. Прогноз (с ретраями) ───────────────────────────────────
@@ -374,11 +389,11 @@ def _fetch_weather_open_meteo(city: str, day_offset: int, hour) -> str | None:
             },
         )
     except (requests.RequestException, ValueError) as e:
-        print(f"❌ [ПОГОДА] Ошибка прогноза: {e}")
+        _dbg(f"ошибка прогноза Open-Meteo: {e}")
         # Резервный источник — wttr.in (иногда доступен, когда Open-Meteo нет)
         fallback = _fetch_weather_wttr(city)
         if fallback:
-            print("✅ [ПОГОДА] Получено через резервный источник wttr.in")
+            _LAST_SOURCE = "wttr.in"
         return fallback
 
     # ── 3. Выбираем точку прогноза согласно time_key ──────────────
@@ -403,8 +418,10 @@ def _fetch_weather_open_meteo(city: str, day_offset: int, hour) -> str | None:
         desc = _WMO_CODES.get(int(code), "неизвестная погода")
 
     except (KeyError, IndexError, TypeError) as e:
-        print(f"❌ [ПОГОДА] Не удалось разобрать ответ: {e}")
+        _dbg(f"не удалось разобрать ответ Open-Meteo: {e}")
         return None
+
+    _LAST_SOURCE = "Open-Meteo"
 
     return _format_weather(temp, desc)
 
@@ -482,5 +499,5 @@ def _fetch_weather_wttr(city: str) -> str | None:
         return f"{temp_spoken}, {desc}" if desc else temp_spoken
 
     except (requests.RequestException, ValueError, KeyError, IndexError) as e:
-        print(f"❌ [ПОГОДА] Резервный источник wttr.in тоже недоступен: {e}")
+        _dbg(f"wttr.in тоже недоступен: {e}")
         return None

@@ -1,10 +1,13 @@
 import os
 import sys
+import time
 
 # Добавляем текущую директорию навыков в путь поиска модулей
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from mp3tales_scraper import Mp3TalesScraper
+import logger
 
 def setup(router):
     """
@@ -18,36 +21,36 @@ def _module_fairytale(parsed_data, assistant):
     """
     # 1. Извлечение названия сказки
     payload = _extract_name(parsed_data)
-    
+    logger.metric("🏷️ ", "Параметры", note=f"сказка: {payload}")
+
     if payload == "неизвестно":
-        assistant.tts.speak("Я не совсем поняла название сказки. Попробуйте еще раз.")
+        assistant.speak("Я не совсем поняла название сказки. Попробуйте еще раз.")
         return
 
-    # 2. Поиск и парсинг аудио (используем отдельный модуль)
+    # 2. Поиск и парсинг аудио (отдельный модуль, с замером времени)
     scraper = Mp3TalesScraper()
-    assistant.tts.speak(f"Ищу сказку под названием {payload}. Одну секунду.")
+    assistant.speak(f"Ищу сказку под названием {payload}. Одну секунду.")
 
-    # Если пользователь попросил "любую", можно добавить логику случайного выбора
-    # Но пока ищем то, что попросили
+    t0 = time.perf_counter()
     page_url = scraper.search_fairytale(payload)
-    
+    audio_url = scraper.get_audio_url(page_url) if page_url else None
+    http_ms = (time.perf_counter() - t0) * 1000
+    logger.metric("🌐", "mp3tales.info (поиск)", http_ms,
+                  payload if audio_url else "не найдено")
+
     if not page_url:
-        assistant.tts.speak("К сожалению, я не нашла такую сказку на сайте МП3 тэйлс инфо.")
+        assistant.speak("К сожалению, я не нашла такую сказку на сайте МП3 тэйлс инфо.")
         return
 
-    audio_url = scraper.get_audio_url(page_url)
-    
     if not audio_url:
-        assistant.tts.speak("Страница сказки найдена, но ссылка на аудиофайл скрыта или недоступна.")
+        assistant.speak("Страница сказки найдена, но ссылка на аудиофайл недоступна.")
         return
 
     # 3. Воспроизведение через стример
-    print(f"🔗 [MARSHAL] Передаю ссылку на стриминг: {audio_url}")
-
     if assistant.streamer.play_url(audio_url):
-        print(f"✅ [SUCCESS] Сказка '{payload}' запущена.")
+        logger.metric("▶️ ", "Воспроизведение", note=payload)
     else:
-        assistant.tts.speak("Не удалось запустить онлайн трансляцию аудио.")
+        assistant.speak("Не удалось запустить онлайн трансляцию аудио.")
 
 def _extract_name(parsed_data):
     """

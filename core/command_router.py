@@ -78,7 +78,8 @@ class CommandRouter:
 
         if intent in self.routes:
             handler = self.routes[intent]
-            logger.system("ROUTER", f"вызов {handler.__module__}.{handler.__name__}()")
+            if os.environ.get("NLU_DEBUG"):
+                logger.system("ROUTER", f"→ {handler.__module__}.{handler.__name__}()")
             handler(parsed_data, assistant_instance)
         else:
             logger.err(f"в реестре нет обработчика для интента «{intent}»")

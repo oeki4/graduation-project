@@ -7,6 +7,12 @@ import requests
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import logger
 
+
+def _dbg(msg: str):
+    """Отладочное сообщение радио — печатается только под RADIO_DEBUG."""
+    if os.environ.get("RADIO_DEBUG"):
+        print(f"   [РАДИО] {msg}")
+
 # Резервный хардкод-список серверов radio-browser.info — на случай, если
 # не удалось обнаружить серверы динамически (см. _discover_servers).
 _FALLBACK_SERVERS = [
@@ -59,42 +65,38 @@ def setup(router):
 
 def _module_radio(parsed_data, assistant):
     """Принимает команду, ищет станцию через API и запускает стриминг."""
+    import time
     text = parsed_data.get("original_text", "").lower().strip()
 
-    logger.step("📻", "Навык", "radio.py")
     station_query = _extract_station_query(text)
+    logger.metric("🏷️ ", "Параметры",
+                  note=f"станция: {station_query or 'популярное русское радио'}")
 
     if station_query:
-        logger.detail(f"ищу станцию: «{station_query}»")
         assistant.speak(f"Ищу {station_query}. Одну секунду.")
-        with logger.Timer("поиск через radio-browser.info"):
-            station = _search_station(station_query)
+        t0 = time.perf_counter()
+        station = _search_station(station_query)
     else:
-        logger.detail("станция не указана → беру популярное русское радио")
         assistant.speak("Включаю популярное радио.")
-        with logger.Timer("поиск через radio-browser.info"):
-            station = _search_station("", country_code="RU")
+        t0 = time.perf_counter()
+        station = _search_station("", country_code="RU")
 
+    source = "radio-browser.info"
     # Фолбэк: если API недоступен, пробуем локальный список прямых потоков
     if not station:
-        logger.warn("API недоступен — пробую локальный список станций")
         station = _find_local_station(station_query)
-        if station:
-            logger.ok(f"локальный фолбэк: {station['name']}")
+        source = "локальный список" if station else source
+
+    http_ms = (time.perf_counter() - t0) * 1000
 
     if not station:
-        logger.err("станция не найдена")
+        logger.metric("🌐", source, http_ms, "станция не найдена")
         assistant.speak("Не удалось найти радиостанцию. Проверьте подключение к интернету.")
         return
 
-    name = station["name"]
+    name = station["name"].strip()
     url  = station["url_resolved"] or station["url"]
-    codec   = station.get("codec", "")
-    bitrate = station.get("bitrate", 0)
-
-    logger.ok(f"найдена: {name.strip()}")
-    logger.kv("URL", url, indent=5)
-    logger.kv("формат", f"{codec}, {bitrate} кбит/с", indent=5)
+    logger.metric("🌐", source, http_ms, name)
 
     assistant.speak(f"Включаю {name}.")
 
@@ -166,10 +168,10 @@ def _discover_servers() -> list[str]:
             servers = list(names)
             random.shuffle(servers)
             _DISCOVERED_SERVERS = servers
-            print(f"🌐 [РАДИО API] Обнаружено серверов: {len(servers)}")
+            _dbg(f"обнаружено серверов: {len(servers)}")
             return servers
     except Exception as e:
-        print(f"⚠️  [РАДИО API] Не удалось обнаружить серверы: {e}")
+        _dbg(f"не удалось обнаружить серверы: {e}")
 
     return list(_FALLBACK_SERVERS)
 
@@ -206,7 +208,7 @@ def _search_station(query: str, country_code: str = "", limit: int = 5) -> dict 
     for server in servers[:4]:  # не более 4 попыток, чтобы не зависнуть надолго
         try:
             url = f"{server}/json/stations/search"
-            print(f"🔍 [РАДИО API] Запрос: {url} | Параметры: {params}")
+            _dbg(f"запрос: {url}")
 
             response = requests.get(url, params=params, timeout=6,
                                     headers={"User-Agent": "VoiceAssistant/1.0"})
@@ -214,7 +216,7 @@ def _search_station(query: str, country_code: str = "", limit: int = 5) -> dict 
 
             stations = response.json()
             if not stations:
-                print(f"⚠️  [РАДИО API] Станций по запросу «{query}» не найдено.")
+                _dbg(f"станций по запросу «{query}» не найдено")
                 return None
 
             # Берём первую станцию с непустым url_resolved
@@ -225,9 +227,9 @@ def _search_station(query: str, country_code: str = "", limit: int = 5) -> dict 
             return None
 
         except requests.RequestException as e:
-            print(f"⚠️  [РАДИО API] Сервер {server} недоступен: {e}. Пробую следующий...")
+            _dbg(f"сервер {server} недоступен: {e}")
 
-    print("❌ [РАДИО API] Все серверы radio-browser.info недоступны.")
+    _dbg("все серверы radio-browser.info недоступны")
     return None
 
 

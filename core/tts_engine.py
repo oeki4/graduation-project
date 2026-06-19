@@ -102,10 +102,12 @@ class TTSEngine:
         cache_file = self._cache_path(text)
 
         if cache_file.exists():
-            logger.system("TTS", f"кэш: {cache_file.name[:8]}…")
+            if os.environ.get("TTS_DEBUG"):
+                logger.system("TTS", f"кэш: {cache_file.name[:8]}…")
             return cache_file
 
-        logger.system("TTS", "синтез (нет в кэше)")
+        if os.environ.get("TTS_DEBUG"):
+            logger.system("TTS", "синтез (нет в кэше)")
         audio_tensor = self.model.apply_tts(
             text=text,
             speaker=self.speaker,
